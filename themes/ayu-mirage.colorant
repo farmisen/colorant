@@ -1,0 +1,23 @@
+# Ayu Mirage
+# https://github.com/ayu-theme/ayu-colors
+
+fg      = #cccac2
+bg      = #242936
+cursor  = #ffcc66
+
+color0  = #1a1f29
+color1  = #ed8274
+color2  = #a6cc70
+color3  = #fad07b
+color4  = #6dcbfa
+color5  = #cfbafa
+color6  = #90e1c6
+color7  = #c7c7c7
+color8  = #686868
+color9  = #f28779
+color10 = #d5ff80
+color11 = #ffd173
+color12 = #73d0ff
+color13 = #dfbfff
+color14 = #95e6cb
+color15 = #ffffff

@@ -1,0 +1,44 @@
+# --- Rust build artifacts ---
+/target/
+**/*.rs.bk
+
+# Cargo.lock is committed for binaries (reproducible builds). Do not ignore.
+
+# --- IDE / editor scratch ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*~
+.\#*
+\#*\#
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# --- Linux ---
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# --- Local environment / scratch ---
+.env
+.env.local
+/tmp/
+/scratch/
+
+# --- Local tooling / agent state ---
+.claude/
+.tldr/
+.tldrignore
+.zed/
+
+# --- Coverage / profiling ---
+*.profraw
+*.profdata
+/coverage/
+tarpaulin-report.html

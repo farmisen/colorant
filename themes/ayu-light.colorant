@@ -1,0 +1,23 @@
+# Ayu Light
+# https://github.com/ayu-theme/ayu-colors
+
+fg      = #5c6166
+bg      = #fcfcfc
+cursor  = #ff6a00
+
+color0  = #ffffff
+color1  = #ef7178
+color2  = #86b300
+color3  = #f2ae49
+color4  = #36a3d9
+color5  = #a37acc
+color6  = #4cbf99
+color7  = #828c99
+color8  = #828c99
+color9  = #f07178
+color10 = #99bf4d
+color11 = #ffaa33
+color12 = #399ee6
+color13 = #a37acc
+color14 = #4cbf99
+color15 = #5c6166

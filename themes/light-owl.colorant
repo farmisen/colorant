@@ -1,0 +1,23 @@
+# Light Owl (light) — Sarah Drasner
+# https://github.com/sdras/night-owl-vscode-theme
+
+fg      = #403f53
+bg      = #fbfbfb
+cursor  = #403f53
+
+color0  = #403f53
+color1  = #de3d3b
+color2  = #08916a
+color3  = #daaa01
+color4  = #288ed7
+color5  = #d6438a
+color6  = #2aa298
+color7  = #f0f0f0
+color8  = #403f53
+color9  = #de3d3b
+color10 = #08916a
+color11 = #daaa01
+color12 = #288ed7
+color13 = #d6438a
+color14 = #2aa298
+color15 = #ffffff

@@ -1,0 +1,40 @@
+# Example palette file (.colorant)
+#
+# A palette is a flat set of color keys
+#
+# Save this as `<name>.colorant` under ~/.config/colorant/themes/ and
+# reference it from a .colorantrc via:
+#
+#   extends       = <name>
+#   extends.dark  = <name>
+#   extends.light = <name>
+#
+# Any key you omit is simply not applied (the terminal keeps whatever it
+# had before for that slot). All values are `#rrggbb` hex; case is mixed
+# freely.
+
+# ── Foreground, background, cursor ──────────────────────────────────
+fg     = #cdd6f4
+bg     = #1e1e2e
+cursor = #f5e0dc
+
+# ── ANSI 16-color palette ───────────────────────────────────────────
+# 0–7 are the standard ANSI colors, 8–15 are the "bright" variants.
+
+color0  = #45475a    # black
+color1  = #f38ba8    # red
+color2  = #a6e3a1    # green
+color3  = #f9e2af    # yellow
+color4  = #89b4fa    # blue
+color5  = #f5c2e7    # magenta
+color6  = #94e2d5    # cyan
+color7  = #bac2de    # white
+
+color8  = #585b70    # bright black
+color9  = #f38ba8    # bright red
+color10 = #a6e3a1    # bright green
+color11 = #f9e2af    # bright yellow
+color12 = #89b4fa    # bright blue
+color13 = #f5c2e7    # bright magenta
+color14 = #94e2d5    # bright cyan
+color15 = #a6adc8    # bright white

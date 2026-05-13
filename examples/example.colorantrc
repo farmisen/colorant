@@ -1,0 +1,53 @@
+# Example config file (.colorantrc)
+#
+# Drop one of these into any directory and the shell hook
+# (installed via `eval "$(colorant init zsh)"`) will pick it up whenever
+# you `cd` into that directory or any subdirectory of it.
+#
+# Three things a .colorantrc can do:
+#   1. Inherit colors from a palette (named `<name>.colorant`).
+#   2. Override individual keys with your own values.
+#   3. Apply different colors in dark vs. light mode.
+#
+# Resolution order in mode M (one of `dark` or `light`):
+#   1. Pick the parent palette: `extends.M` if set, else `extends`, else none.
+#   2. Load that palette as the starting point.
+#   3. Apply the top-level keys below.
+#   4. Apply the `[M]` section if present.
+
+# ── Inheritance ─────────────────────────────────────────────────────
+#
+# Three styles to pick from. Use whichever fits.
+
+# (a) One theme for both modes:
+# extends = catppuccin-mocha
+
+# (b) Different themes per mode (this is what most people want):
+extends.dark  = tokyo-night
+extends.light = catppuccin-latte
+
+# (c) `extends.dark` + a global `extends` as light-mode fallback:
+# extends       = catppuccin-latte
+# extends.dark  = tokyo-night
+#
+# Or no extends at all — only the keys below will apply.
+
+# ── Mode-agnostic overrides ─────────────────────────────────────────
+#
+# Top-level keys apply in BOTH modes. They override whatever the
+# inherited palette set.
+
+# fg = #ffffff
+# bg = #000000
+# cursor = #80a4c2
+
+# ── Per-mode overrides ──────────────────────────────────────────────
+#
+# Keys inside `[dark]` or `[light]` apply only in that mode, and
+# override both the inherited palette and the top-level keys above.
+
+[dark]
+# cursor = #f7768e
+
+[light]
+# cursor = #d20f39

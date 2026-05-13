@@ -1,0 +1,33 @@
+[package]
+name = "colorant"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["farmisen <farmisen@codery-royale.com>"]
+description = "Per-directory terminal theme switcher with system dark/light mode support"
+license = "MIT"
+repository = "https://github.com/farmisen/colorant"
+homepage = "https://github.com/farmisen/colorant"
+readme = "README.md"
+keywords = ["terminal", "theme", "ghostty", "kitty", "iterm2"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "colorant"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,23 @@
+# Ayu Dark
+# https://github.com/ayu-theme/ayu-colors
+
+fg      = #bfbdb6
+bg      = #0b0e14
+cursor  = #ffb454
+
+color0  = #11151c
+color1  = #ea6c73
+color2  = #7fd962
+color3  = #f9af4f
+color4  = #5ac8fa
+color5  = #cda1fa
+color6  = #95e6cb
+color7  = #c7c7c7
+color8  = #686868
+color9  = #f07178
+color10 = #aad94c
+color11 = #ffb454
+color12 = #59c2ff
+color13 = #d2a6ff
+color14 = #95e6cb
+color15 = #ffffff
