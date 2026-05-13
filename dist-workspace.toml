@@ -21,4 +21,4 @@ install-updater = false
 # Publish a Homebrew formula to this tap on every release.
 tap = "farmisen/homebrew-tap"
 # Jobs to run when publishing (in addition to the GitHub Release).
-publish-jobs = ["homebrew"]
+publish-jobs = ["homebrew", "./publish-crates-io"]
