@@ -71,11 +71,9 @@ shasum -a 256 -c colorant-aarch64-apple-darwin.tar.xz.sha256
 echo 'eval "$(colorant init zsh)"' >> ~/.zshrc
 exec zsh
 
-# 2. Drop a bundled palette into your themes dir. (Pick any name from the
-#    themes/ directory in this repo; catppuccin-mocha is a safe default.)
-mkdir -p ~/.config/colorant/themes
-curl -fL https://raw.githubusercontent.com/farmisen/colorant/main/themes/catppuccin-mocha.colorant \
-  -o ~/.config/colorant/themes/catppuccin-mocha.colorant
+# 2. Install the bundled palettes into your themes dir. (`colorant themes list`
+#    enumerates what's available; `--all` copies every bundled palette.)
+colorant themes install --all
 
 # 3. Tag a directory with that palette.
 cd ~/work/myproject
@@ -99,6 +97,7 @@ the latter applies on your next prompt (your next command or Enter press).
 | `colorant reset` | Reset the terminal's foreground, background, cursor, and 16 palette entries to their defaults. |
 | `colorant current` | Print the path of the `.colorantrc` that would be applied for the current directory. Empty output if none is found. |
 | `colorant init <shell>` | Print a shell-specific integration snippet to stdout, intended for `eval`. Currently `zsh` only. |
+| `colorant themes <action>` | Manage bundled palettes. `list` enumerates them (and marks which are installed); `install [<name>\|--all] [--force]` copies bundled palettes into the themes dir; `path` prints the resolved themes dir. |
 
 The `apply` command is what the shell hook calls on every `chpwd` /
 `precmd`; you generally don't need to invoke it manually unless debugging.

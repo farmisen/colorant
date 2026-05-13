@@ -18,5 +18,6 @@ fn main() -> Result<()> {
         cli::Command::Reset => commands::reset::run(),
         cli::Command::Current => commands::current::run(),
         cli::Command::Init { shell } => commands::init::run(shell),
+        cli::Command::Themes { action } => commands::themes::run(&config, action),
     }
 }
