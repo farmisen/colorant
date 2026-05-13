@@ -37,6 +37,46 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
+
+    /// Manage bundled palettes (list, install, locate the themes dir).
+    Themes {
+        #[command(subcommand)]
+        action: ThemesAction,
+    },
+}
+
+/// Sub-actions for the `themes` command group.
+#[derive(Debug, Subcommand)]
+pub enum ThemesAction {
+    /// List bundled palettes, marking which are already installed.
+    List,
+
+    /// Copy bundled palettes into the user's themes directory.
+    ///
+    /// Use a specific name to install just that palette, or `--all` to
+    /// install every bundled palette. By default refuses to overwrite
+    /// existing files — pass `--force` to overwrite.
+    Install {
+        /// Name of a single bundled palette to install.
+        ///
+        /// Mutually exclusive with `--all`. Without either, the command
+        /// errors with a hint pointing at both options — the validation
+        /// lives in `commands::themes::run_install` so the message can be
+        /// helpful, since clap's `required_unless_present` only reports a
+        /// generic "argument required" error.
+        name: Option<String>,
+
+        /// Install every bundled palette.
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+
+        /// Overwrite existing palette files.
+        #[arg(long, short)]
+        force: bool,
+    },
+
+    /// Print the configured themes directory.
+    Path,
 }
 
 /// The shell selector accepted by `colorant init <shell>`.

@@ -394,3 +394,250 @@ fn default_theme_applies_when_no_rc_found() {
         "expected fallback palette OSCs: {stdout:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `colorant themes` command group.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn themes_list_enumerates_bundled_palettes() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "list"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // At least the well-known palettes show up.
+    for expected in ["catppuccin-mocha", "tokyo-night", "nord"] {
+        assert!(
+            stdout.lines().any(|l| l.starts_with(expected)),
+            "expected {expected:?} in list output: {stdout:?}"
+        );
+    }
+}
+
+#[test]
+fn themes_list_marks_installed_palettes() {
+    let ws = make_workspace();
+    let (xdg, themes_dir) = setup_xdg(&ws);
+    fs::write(themes_dir.join("nord.colorant"), "fg = #aaaaaa\n").unwrap();
+
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["themes", "list"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.lines().any(|l| l == "nord (installed)"),
+        "expected nord to be marked installed: {stdout:?}"
+    );
+    assert!(
+        stdout.lines().any(|l| l == "catppuccin-mocha"),
+        "expected catppuccin-mocha unmarked: {stdout:?}"
+    );
+}
+
+#[test]
+fn themes_path_prints_resolved_themes_dir() {
+    let ws = make_workspace();
+    let (xdg, themes_dir) = setup_xdg(&ws);
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["themes", "path"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), themes_dir.to_str().unwrap());
+}
+
+#[test]
+fn themes_install_one_creates_file() {
+    let ws = make_workspace();
+    let (xdg, themes_dir) = setup_xdg(&ws);
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "install", "nord"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let installed = themes_dir.join("nord.colorant");
+    assert!(
+        installed.is_file(),
+        "expected nord.colorant at {installed:?}"
+    );
+    let content = fs::read_to_string(&installed).unwrap();
+    assert!(
+        content.contains("fg") && content.contains("bg"),
+        "palette looks empty: {content:?}"
+    );
+}
+
+#[test]
+fn themes_install_creates_missing_themes_dir() {
+    // The themes dir doesn't exist yet — install must create it.
+    let ws = make_workspace();
+    let xdg = ws.path().join("xdg");
+    fs::create_dir_all(xdg.join("colorant")).unwrap();
+    let themes_dir = xdg.join("colorant").join("themes");
+    assert!(!themes_dir.exists());
+
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "install", "nord"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(themes_dir.join("nord.colorant").is_file());
+}
+
+#[test]
+fn themes_install_one_refuses_overwrite_without_force() {
+    let ws = make_workspace();
+    let (xdg, themes_dir) = setup_xdg(&ws);
+    fs::write(themes_dir.join("nord.colorant"), "old\n").unwrap();
+
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "install", "nord"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_ne!(code, 0, "expected non-zero exit; stderr: {stderr}");
+    assert!(
+        stderr.contains("--force"),
+        "expected --force hint in stderr: {stderr:?}"
+    );
+    // Original file is untouched.
+    assert_eq!(
+        fs::read_to_string(themes_dir.join("nord.colorant")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
+fn themes_install_one_force_overwrites() {
+    let ws = make_workspace();
+    let (xdg, themes_dir) = setup_xdg(&ws);
+    fs::write(themes_dir.join("nord.colorant"), "old\n").unwrap();
+
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "install", "nord", "--force"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let content = fs::read_to_string(themes_dir.join("nord.colorant")).unwrap();
+    assert_ne!(content, "old\n", "expected overwrite");
+    assert!(content.contains("fg"));
+}
+
+#[test]
+fn themes_install_unknown_name_errors() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "install", "definitely-not-a-real-theme"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("no bundled palette"),
+        "expected 'no bundled palette' in stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn themes_install_all_populates_themes_dir() {
+    let ws = make_workspace();
+    let (xdg, themes_dir) = setup_xdg(&ws);
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "install", "--all"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("installed"),
+        "expected install summary: {stdout:?}"
+    );
+    // Spot-check a few known palettes exist on disk.
+    for name in ["catppuccin-mocha", "tokyo-night", "nord"] {
+        let path = themes_dir.join(format!("{name}.colorant"));
+        assert!(path.is_file(), "expected {path:?} after --all");
+    }
+}
+
+#[test]
+fn themes_install_all_is_idempotent_skipping_existing() {
+    let ws = make_workspace();
+    let (xdg, themes_dir) = setup_xdg(&ws);
+
+    // First run installs everything.
+    let (_, _, code) = run_in(
+        ws.path(),
+        &["themes", "install", "--all"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0);
+
+    // Sentinel content on one file proves it isn't rewritten without --force.
+    let nord = themes_dir.join("nord.colorant");
+    fs::write(&nord, "sentinel\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "install", "--all"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "second run must exit 0; stderr: {stderr}");
+    assert!(
+        stdout.contains("skipping") && stdout.contains("nord"),
+        "expected skip messages: {stdout:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&nord).unwrap(),
+        "sentinel\n",
+        "sentinel must survive a no-force --all"
+    );
+}
+
+#[test]
+fn themes_install_all_force_overwrites_everything() {
+    let ws = make_workspace();
+    let (xdg, themes_dir) = setup_xdg(&ws);
+    fs::write(themes_dir.join("nord.colorant"), "sentinel\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "install", "--all", "--force"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let content = fs::read_to_string(themes_dir.join("nord.colorant")).unwrap();
+    assert_ne!(content, "sentinel\n");
+    // Summary line must honestly report overwrites (not "0 already present").
+    assert!(
+        stdout.contains("1 overwritten"),
+        "expected summary to report 1 overwritten, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn themes_install_without_name_or_all_errors() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "install"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("--all") || stderr.contains("palette name"),
+        "expected guidance on how to call install: {stderr:?}"
+    );
+}

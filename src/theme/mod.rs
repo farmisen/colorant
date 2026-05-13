@@ -6,6 +6,7 @@
 //! `resolve` flattens a `ParsedRc` into the single `ThemeLayer` to emit for a
 //! given mode, walking the `extends` chain along the way.
 
+pub(crate) mod bundled;
 pub mod model;
 pub mod parse;
 pub mod resolve;

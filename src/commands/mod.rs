@@ -8,3 +8,4 @@ pub mod apply;
 pub mod current;
 pub mod init;
 pub mod reset;
+pub mod themes;
