@@ -1,5 +1,7 @@
 # colorant
 
+[![CI](https://github.com/farmisen/colorant/actions/workflows/ci.yml/badge.svg)](https://github.com/farmisen/colorant/actions/workflows/ci.yml)
+
 Per-directory terminal theme switcher with system dark/light mode support.
 
 `colorant` walks up from your current directory looking for a `.colorantrc`
@@ -63,7 +65,17 @@ always beats top-level keys within the same file.
 
 ## Install
 
-TBD (Homebrew, install script, `cargo install` — coming).
+Pre-built macOS binaries (Intel + Apple Silicon) land with the first tagged
+release. Once `v0.1.0` is published, three install paths will be supported:
+
+- **Homebrew** via the tap: `brew install farmisen/tap/colorant`
+- **Shell installer** (downloads the right binary for your arch):
+  `curl -fsSL https://github.com/farmisen/colorant/releases/latest/download/colorant-installer.sh | sh`
+- **From source** with cargo:
+  `cargo install --git https://github.com/farmisen/colorant.git`
+
+Full install docs (including verification and uninstall) land in a follow-up
+once the first release is live.
 
 ## Build from source
 
