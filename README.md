@@ -49,7 +49,7 @@ For Rust developers, or to pin a specific version:
 cargo install --git https://github.com/farmisen/colorant.git
 
 # pinned to a release tag
-cargo install --git https://github.com/farmisen/colorant.git --tag v0.1.0
+cargo install --git https://github.com/farmisen/colorant.git --tag v0.3.0
 ```
 
 Installs to `~/.cargo/bin/colorant`.
@@ -89,7 +89,7 @@ the latter applies on your next prompt (your next command or Enter press).
 
 ## Commands
 
-`colorant --help` is the canonical reference. The four subcommands:
+`colorant --help` is the canonical reference. The subcommands:
 
 | Command | What it does |
 |---|---|
@@ -98,6 +98,7 @@ the latter applies on your next prompt (your next command or Enter press).
 | `colorant current` | Print the path of the `.colorantrc` that would be applied for the current directory. Empty output if none is found. |
 | `colorant init <shell>` | Print a shell-specific integration snippet to stdout, intended for `eval`. Currently `zsh` only. |
 | `colorant themes <action>` | Manage bundled palettes. `list` enumerates them (and marks which are installed); `install [<name>\|--all] [--force]` copies bundled palettes into the themes dir; `path` prints the resolved themes dir. |
+| `colorant doctor [path]` | Diagnose silent failures in a `.colorantrc`: unknown keys, invalid colors, malformed lines, unknown sections, and `extends` references whose palette files aren't on disk. Without `path`, walks up from the current directory like `current`. Exits 0 if nothing is wrong, 1 otherwise. |
 
 The `apply` command is what the shell hook calls on every `chpwd` /
 `precmd`; you generally don't need to invoke it manually unless debugging.

@@ -43,6 +43,14 @@ pub enum Command {
         #[command(subcommand)]
         action: ThemesAction,
     },
+
+    /// Diagnose silent failures in a .colorantrc: unknown keys, invalid
+    /// colors, missing extends palettes, and so on. Without `path`, walks
+    /// up from the current directory like `colorant current`.
+    Doctor {
+        /// Path to a specific `.colorantrc` to check.
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 /// Sub-actions for the `themes` command group.

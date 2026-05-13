@@ -40,7 +40,7 @@ impl HexColor {
 }
 
 /// Reasons a string fails to be a valid theme name.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ThemeNameError {
     #[error("theme name must not be empty")]
     Empty,
@@ -148,7 +148,7 @@ impl ThemeLayer {
 
 /// The parsed contents of a `.colorant` palette file. Just colors, no
 /// inheritance or mode logic.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedPalette {
     /// The flat color set declared in the palette file.
     pub(crate) layer: ThemeLayer,
@@ -158,7 +158,7 @@ pub struct ParsedPalette {
 /// parent palette names (one global, optionally one per mode), plus the
 /// file's own keys split into a `base` layer (always applied) and per-mode
 /// overlays (`dark`, `light`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedRc {
     /// Palette name applied in both modes when no per-mode override is set.
     pub(crate) extends: Option<ThemeName>,

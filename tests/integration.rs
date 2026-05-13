@@ -641,3 +641,200 @@ fn themes_install_without_name_or_all_errors() {
         "expected guidance on how to call install: {stderr:?}"
     );
 }
+
+#[test]
+fn doctor_clean_rc_exits_zero() {
+    let ws = make_workspace();
+    let (xdg, themes) = setup_xdg(&ws);
+    fs::write(themes.join("ayu.colorant"), "fg = #abcdef\n").unwrap();
+    fs::write(
+        ws.path().join(".colorantrc"),
+        "extends = ayu\nfg = #ffffff\n",
+    )
+    .unwrap();
+
+    let rc = ws.path().join(".colorantrc");
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["doctor", rc.to_str().unwrap()],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains("Palette(s):"), "{stdout}");
+    assert!(stdout.contains("No issues found."), "{stdout}");
+    // Symmetric confirmation: one "No parsing errors." line for the rc
+    // itself, one for the audited palette (light and dark resolve to the
+    // same palette, so dedup keeps it to one audit).
+    assert_eq!(
+        stdout.matches("No parsing errors.").count(),
+        2,
+        "expected one confirmation per audited file: {stdout}"
+    );
+    // Doctor no longer appends a "(found)" suffix on successful resolutions;
+    // the absence of "(NOT FOUND)" + exit 0 is the signal.
+    assert!(!stdout.contains("(found)"), "{stdout}");
+    assert!(!stdout.contains("NOT FOUND"), "{stdout}");
+}
+
+#[test]
+fn doctor_surfaces_palette_parsing_errors() {
+    // A clean rc that extends a palette with drops should still exit 1 and
+    // surface the palette's drops indented under its resolution line.
+    let ws = make_workspace();
+    let (xdg, themes) = setup_xdg(&ws);
+    fs::write(
+        themes.join("dirty.colorant"),
+        "fg = #abcdef\nforground = #112233\nbg = nope\n",
+    )
+    .unwrap();
+    fs::write(ws.path().join(".colorantrc"), "extends = dirty\n").unwrap();
+
+    let rc = ws.path().join(".colorantrc");
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["doctor", rc.to_str().unwrap()],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}");
+    assert!(stdout.contains("unknown key 'forground'"), "{stdout}");
+    assert!(stdout.contains("invalid color 'nope'"), "{stdout}");
+    // Both modes resolve to the same palette via global `extends`, but the
+    // palette is audited only once.
+    assert_eq!(
+        stdout.matches("unknown key 'forground'").count(),
+        1,
+        "palette should be audited once even when both modes share it: {stdout}"
+    );
+    // The second mode's row gets an explicit "not re-audited" note so the
+    // user isn't left guessing whether it was checked.
+    assert!(
+        stdout.contains("(same palette as above; not re-audited)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Found 2 issues."), "{stdout}");
+}
+
+#[test]
+fn doctor_walks_up_when_no_path_given() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let nested = ws.path().join("a/b/c");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(ws.path().join(".colorantrc"), "fg = #ffffff\n").unwrap();
+
+    let (stdout, _, _) = run_in(
+        &nested,
+        &["doctor"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert!(stdout.contains("Checking "), "{stdout}");
+    assert!(stdout.contains(".colorantrc"), "{stdout}");
+}
+
+#[test]
+fn doctor_no_rc_anywhere_exits_one() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let nested = ws.path().join("a/b");
+    fs::create_dir_all(&nested).unwrap();
+
+    let (stdout, _, code) = run_in(
+        &nested,
+        &["doctor"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 1);
+    assert!(stdout.contains("No .colorantrc found"), "{stdout}");
+}
+
+#[test]
+fn doctor_reports_every_drop_kind() {
+    let ws = make_workspace();
+    let (xdg, themes) = setup_xdg(&ws);
+    fs::write(themes.join("good.colorant"), "fg = #abcdef\n").unwrap();
+    let rc = ws.path().join("dirty.colorantrc");
+    fs::write(
+        &rc,
+        "extends = good\n\
+         extends.light = bad/name\n\
+         forground = #112233\n\
+         bg = nope\n\
+         [lite]\n\
+         cursor = #ff00ff\n\
+         no equals here\n",
+    )
+    .unwrap();
+
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["doctor", rc.to_str().unwrap()],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}");
+    assert!(stdout.contains("invalid theme name 'bad/name'"), "{stdout}");
+    assert!(stdout.contains("unknown key 'forground'"), "{stdout}");
+    assert!(stdout.contains("invalid color 'nope'"), "{stdout}");
+    assert!(stdout.contains("unknown section [lite]"), "{stdout}");
+    assert!(stdout.contains("malformed line"), "{stdout}");
+    assert!(stdout.contains("Found 5 issues."), "{stdout}");
+}
+
+#[test]
+fn doctor_reports_missing_extends_palette() {
+    // Clean rc, but the named palette file isn't installed in themes/.
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let rc = ws.path().join(".colorantrc");
+    fs::write(&rc, "extends = does-not-exist\n").unwrap();
+
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["doctor", rc.to_str().unwrap()],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 1, "stdout: {stdout}");
+    assert!(stdout.contains("NOT FOUND"), "{stdout}");
+    assert!(stdout.contains("does-not-exist"), "{stdout}");
+    assert!(
+        stdout.contains("Found 2 issue"),
+        "missing palette is reported once per mode: {stdout}"
+    );
+}
+
+#[test]
+fn doctor_explicit_path_that_doesnt_exist_errors_nonzero() {
+    // doctor on a path that isn't a real file should fail nonzero (the
+    // read_to_string propagates as anyhow::Error → stderr → exit 1).
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let missing = ws.path().join("nope.colorantrc");
+
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["doctor", missing.to_str().unwrap()],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("reading") && stderr.contains("nope.colorantrc"),
+        "expected anyhow context naming the file, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn doctor_no_parent_palette_is_not_an_issue() {
+    // An rc with only its own keys (no extends) is valid — doctor should
+    // call that out as "no parent palette" without counting it as an issue.
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let rc = ws.path().join(".colorantrc");
+    fs::write(&rc, "fg = #ffffff\nbg = #000000\n").unwrap();
+
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["doctor", rc.to_str().unwrap()],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains("no parent palette"), "{stdout}");
+}
