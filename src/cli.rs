@@ -51,6 +51,16 @@ pub enum Command {
         /// Path to a specific `.colorantrc` to check.
         path: Option<std::path::PathBuf>,
     },
+
+    /// Print the resolved colors that would apply for the current
+    /// directory, with hex codes and 24-bit swatches. Defaults to the
+    /// current OS dark/light mode; pass `--all` to print both modes.
+    Show {
+        /// Print both dark and light resolutions instead of just the
+        /// current mode.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 /// Sub-actions for the `themes` command group.

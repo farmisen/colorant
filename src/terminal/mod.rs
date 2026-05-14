@@ -6,4 +6,5 @@
 //! it's one we know how to theme).
 
 pub mod osc;
+pub mod style;
 pub mod utils;

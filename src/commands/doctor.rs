@@ -13,6 +13,7 @@
 //! isn't a TTY or when `NO_COLOR` is set.
 
 use crate::config::{Config, THEME_FILE_NAME};
+use crate::terminal::style::Style;
 use crate::theme::model::{Mode, ParsedRc};
 use crate::theme::parse::{
     DropReason, parse_palette_str_with_diagnostics, parse_rc_str_with_diagnostics,
@@ -21,68 +22,9 @@ use crate::theme::resolve::PALETTE_EXTENSION;
 use crate::walk;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-
-/// Minimal ANSI-coloring helper. Captured by value once at the start of
-/// `run` so the decision (color or not) doesn't drift mid-report.
-#[derive(Clone, Copy)]
-struct Style {
-    color: bool,
-}
-
-impl Style {
-    /// Enable colors only when stdout is a TTY and `NO_COLOR` is unset.
-    /// This matches `colorant doctor | tee log` producing plain text — and
-    /// keeps integration tests (which run colorant via `Command` with
-    /// captured stdout) free of escape codes.
-    fn detect() -> Self {
-        Self::for_env(
-            std::io::stdout().is_terminal(),
-            std::env::var_os("NO_COLOR").is_some(),
-        )
-    }
-
-    /// Pure decision split out from `detect` for unit-testability.
-    fn for_env(stdout_is_tty: bool, no_color_set: bool) -> Self {
-        Self {
-            color: stdout_is_tty && !no_color_set,
-        }
-    }
-
-    fn red<'a>(self, text: &'a str) -> Painted<'a> {
-        Painted::new(text, "\x1b[31m", self.color)
-    }
-
-    fn green<'a>(self, text: &'a str) -> Painted<'a> {
-        Painted::new(text, "\x1b[32m", self.color)
-    }
-}
-
-/// `Display` wrapper that emits an ANSI escape pair around `text` when the
-/// originating `Style` had colors enabled.
-struct Painted<'a> {
-    text: &'a str,
-    prefix: &'static str,
-    suffix: &'static str,
-}
-
-impl<'a> Painted<'a> {
-    fn new(text: &'a str, prefix: &'static str, enabled: bool) -> Self {
-        Self {
-            text,
-            prefix: if enabled { prefix } else { "" },
-            suffix: if enabled { "\x1b[0m" } else { "" },
-        }
-    }
-}
-
-impl std::fmt::Display for Painted<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}{}{}", self.prefix, self.text, self.suffix)
-    }
-}
 
 /// Entry point routed from `main.rs`. Returns `ExitCode::FAILURE` if any
 /// issue was reported so shell users can gate on it
@@ -285,28 +227,5 @@ fn format_reason(r: &DropReason) -> String {
         DropReason::InvalidExtendsName { key, value, error } => {
             format!("invalid theme name '{value}' for key '{key}': {error}")
         }
-    }
-}
-
-#[cfg(test)]
-mod style_tests {
-    use super::Style;
-
-    #[test]
-    fn color_enabled_only_on_tty_without_no_color() {
-        assert!(Style::for_env(true, false).color);
-        assert!(!Style::for_env(false, false).color);
-        assert!(!Style::for_env(true, true).color);
-        assert!(!Style::for_env(false, true).color);
-    }
-
-    #[test]
-    fn painted_emits_escapes_only_when_enabled() {
-        let on = Style::for_env(true, false);
-        let off = Style::for_env(false, false);
-        assert_eq!(format!("{}", on.red("err")), "\x1b[31merr\x1b[0m");
-        assert_eq!(format!("{}", on.green("ok")), "\x1b[32mok\x1b[0m");
-        assert_eq!(format!("{}", off.red("err")), "err");
-        assert_eq!(format!("{}", off.green("ok")), "ok");
     }
 }
