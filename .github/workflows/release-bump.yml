@@ -1,0 +1,81 @@
+name: Release bump
+
+# Manual one-click release: bumps `Cargo.toml` + `Cargo.lock`, refreshes
+# README's pinned-install example, commits to main, and pushes a matching
+# `v<version>` tag. The tag push fires `release.yml` (cargo-dist), which
+# builds binaries, updates the Homebrew tap, and publishes to crates.io.
+#
+# ## Required repo secret
+#
+# `RELEASE_BUMP_TOKEN` — a fine-grained PAT scoped to this repo with
+# `Contents: Read and write`. Needed because pushes made with the default
+# `GITHUB_TOKEN` do not fire other workflows (loop protection), so the tag
+# push would otherwise not trigger `release.yml`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_level:
+        description: Semver bump level
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # PAT, not GITHUB_TOKEN — see header comment.
+          token: ${{ secrets.RELEASE_BUMP_TOKEN }}
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit (for `cargo set-version`)
+        run: cargo install cargo-edit --locked
+
+      - name: Bump version and regenerate Cargo.lock
+        id: bump
+        run: |
+          set -euo pipefail
+          cargo set-version --bump "${{ inputs.bump_level }}"
+          new_version=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "colorant") | .version')
+          # `cargo set-version` updates Cargo.toml; we still need Cargo.lock
+          # to reflect the new package version.
+          cargo update --workspace
+          # Keep the README's pinned-install example in sync so docs match
+          # the version we're about to ship.
+          sed -i -E "s|--tag v[0-9]+\.[0-9]+\.[0-9]+|--tag v${new_version}|" README.md
+          echo "version=${new_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag, push
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          git add Cargo.toml Cargo.lock README.md
+          git commit -m "Bump version to ${NEW_VERSION}"
+          git tag "v${NEW_VERSION}"
+          git push origin HEAD:main
+          git push origin "v${NEW_VERSION}"
+
+      - name: Summary
+        run: |
+          echo "Tagged v${{ steps.bump.outputs.version }}." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release workflow: https://github.com/${{ github.repository }}/actions/workflows/release.yml" >> "$GITHUB_STEP_SUMMARY"
