@@ -21,6 +21,7 @@ fn run_in(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> (String, String, 
         "TMUX",
         "HOME",
         "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
         "TERM_PROGRAM",
         "TERM",
         "NO_COLOR",
@@ -406,14 +407,17 @@ fn themes_list_enumerates_bundled_palettes() {
     let (xdg, _) = setup_xdg(&ws);
     let (stdout, stderr, code) = run_in(
         ws.path(),
-        &["themes", "list"],
+        &["themes", "list", "--source", "bundled"],
         &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
     );
     assert_eq!(code, 0, "stderr: {stderr}");
-    // At least the well-known palettes show up.
+    // At least the well-known palettes show up. The list is now prefixed
+    // with the source — e.g. `[bundled] catppuccin-mocha`.
     for expected in ["catppuccin-mocha", "tokyo-night", "nord"] {
         assert!(
-            stdout.lines().any(|l| l.starts_with(expected)),
+            stdout
+                .lines()
+                .any(|l| l.starts_with("[bundled] ") && l.contains(expected)),
             "expected {expected:?} in list output: {stdout:?}"
         );
     }
@@ -427,16 +431,16 @@ fn themes_list_marks_installed_palettes() {
 
     let (stdout, _, code) = run_in(
         ws.path(),
-        &["themes", "list"],
+        &["themes", "list", "--source", "bundled"],
         &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
     );
     assert_eq!(code, 0);
     assert!(
-        stdout.lines().any(|l| l == "nord (installed)"),
+        stdout.lines().any(|l| l == "[bundled] nord (installed)"),
         "expected nord to be marked installed: {stdout:?}"
     );
     assert!(
-        stdout.lines().any(|l| l == "catppuccin-mocha"),
+        stdout.lines().any(|l| l == "[bundled] catppuccin-mocha"),
         "expected catppuccin-mocha unmarked: {stdout:?}"
     );
 }
@@ -624,6 +628,218 @@ fn themes_install_all_force_overwrites_everything() {
     assert!(
         stdout.contains("1 overwritten"),
         "expected summary to report 1 overwritten, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn themes_search_filters_bundled_substring_case_insensitively() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["themes", "search", "Mocha", "--source", "bundled"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.lines().any(|l| l.contains("catppuccin-mocha")),
+        "expected catppuccin-mocha hit: {stdout:?}"
+    );
+    assert!(
+        !stdout.lines().any(|l| l.contains("ayu-")),
+        "non-matching theme should not appear: {stdout:?}"
+    );
+}
+
+#[test]
+fn themes_search_reports_no_hits_for_unknown_query() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &[
+            "themes",
+            "search",
+            "zzzzz-no-such-theme",
+            "--source",
+            "bundled",
+        ],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("no themes matched"), "{stdout:?}");
+}
+
+#[test]
+fn themes_apply_writes_global_extends_to_rc() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "apply", "catppuccin-mocha"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let rc = fs::read_to_string(ws.path().join(".colorantrc")).unwrap();
+    assert!(
+        rc.contains("extends = catppuccin-mocha"),
+        "expected global extends: {rc:?}"
+    );
+    // Auto-install side effect: the bundled palette was written to disk.
+    assert!(
+        xdg.join("colorant")
+            .join("themes")
+            .join("catppuccin-mocha.colorant")
+            .exists(),
+        "expected catppuccin-mocha.colorant in themes dir"
+    );
+}
+
+#[test]
+fn themes_apply_dark_and_light_writes_per_mode_extends() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let (_, _, code) = run_in(
+        ws.path(),
+        &[
+            "themes",
+            "apply",
+            "--dark",
+            "tokyo-night",
+            "--light",
+            "catppuccin-latte",
+        ],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0);
+    let rc = fs::read_to_string(ws.path().join(".colorantrc")).unwrap();
+    assert!(rc.contains("extends.dark = tokyo-night"), "{rc:?}");
+    assert!(rc.contains("extends.light = catppuccin-latte"), "{rc:?}");
+    assert!(!rc.contains("extends = "), "no global extends: {rc:?}");
+}
+
+#[test]
+fn themes_apply_preserves_other_base_keys() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let rc_path = ws.path().join(".colorantrc");
+    fs::write(
+        &rc_path,
+        "extends = old\nfg = #ff00ff\n[dark]\ncursor = #abcdef\n",
+    )
+    .unwrap();
+
+    let (_, _, code) = run_in(
+        ws.path(),
+        &["themes", "apply", "catppuccin-mocha"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0);
+    let rc = fs::read_to_string(&rc_path).unwrap();
+    assert!(rc.contains("extends = catppuccin-mocha"), "{rc:?}");
+    assert!(rc.contains("fg = #ff00ff"), "{rc:?}");
+    assert!(rc.contains("[dark]"), "{rc:?}");
+    assert!(rc.contains("cursor = #abcdef"), "{rc:?}");
+    assert!(!rc.contains("extends = old"), "{rc:?}");
+}
+
+#[test]
+fn themes_apply_per_mode_preserves_existing_dark_section_block() {
+    // Locks the contiguous-section invariant: applying --dark/--light to
+    // an rc that already has a `[dark]` block must keep that block intact
+    // and in place, not just present-somewhere.
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let rc_path = ws.path().join(".colorantrc");
+    fs::write(
+        &rc_path,
+        "fg = #ff00ff\n[dark]\ncursor = #abcdef\ncolor0 = #001122\n",
+    )
+    .unwrap();
+
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &[
+            "themes",
+            "apply",
+            "--dark",
+            "tokyo-night",
+            "--light",
+            "catppuccin-latte",
+        ],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let rc = fs::read_to_string(&rc_path).unwrap();
+    // The [dark] block must stay contiguous — keys neither reordered nor
+    // displaced into a separate section.
+    assert!(
+        rc.contains("[dark]\ncursor = #abcdef\ncolor0 = #001122"),
+        "[dark] block should be intact: {rc:?}"
+    );
+    // And the new extends keys land above the base content.
+    assert!(rc.starts_with("extends.dark = tokyo-night"), "{rc:?}");
+}
+
+#[test]
+fn themes_list_continues_past_unsynced_remote() {
+    // Without `--source`, list iterates every source. Gogh isn't synced
+    // in this test (fresh workspace), so it should surface a warning on
+    // stderr but still print the bundled list on stdout — exit 0.
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    // Point the cache somewhere empty so gogh definitely isn't synced.
+    let cache = ws.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "list"],
+        &[
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+            ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.lines().any(|l| l.starts_with("[bundled] ")),
+        "expected bundled themes on stdout: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("[gogh]") && stderr.contains("not synced"),
+        "expected gogh warning on stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn themes_apply_errors_on_unknown_theme() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "apply", "definitely-not-a-real-theme"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("not") && stderr.contains("installed") && stderr.contains("bundled"),
+        "expected guidance about lookup failure: {stderr:?}"
+    );
+}
+
+#[test]
+fn themes_apply_requires_at_least_one_target() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let (_, stderr, code) = run_in(
+        ws.path(),
+        &["themes", "apply"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("--dark") || stderr.contains("theme name"),
+        "{stderr:?}"
     );
 }
 

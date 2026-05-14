@@ -84,3 +84,70 @@ fn config_dir() -> Option<PathBuf> {
     }
     dirs::home_dir().map(|h| h.join(".config").join("colorant"))
 }
+
+/// The directory holding colorant's cached state — remote theme catalogs,
+/// fetched palette files, anything that's *derived* and safe to wipe.
+///
+/// Mirrors `config_dir`'s XDG convention: `$XDG_CACHE_HOME/colorant` if
+/// set, otherwise `$HOME/.cache/colorant`. Returns `None` only when
+/// neither `$XDG_CACHE_HOME` nor `$HOME` resolves — the caller treats
+/// that as a hard error rather than silently fabricating a path.
+pub fn cache_dir() -> Option<PathBuf> {
+    cache_dir_for(std::env::var("XDG_CACHE_HOME").ok(), dirs::home_dir())
+}
+
+/// Pure decision split out from `cache_dir` for unit-testability.
+/// Mutating `XDG_CACHE_HOME` from within `#[test]` is racy under
+/// parallel tests, so the policy lives here and the env probe stays in
+/// the wrapper.
+fn cache_dir_for(xdg: Option<String>, home: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(xdg) = xdg
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("colorant"));
+    }
+    home.map(|h| h.join(".cache").join("colorant"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_dir_uses_xdg_when_set() {
+        let xdg = Some("/tmp/xdg".to_string());
+        let home = Some(PathBuf::from("/home/me"));
+        assert_eq!(
+            cache_dir_for(xdg, home),
+            Some(PathBuf::from("/tmp/xdg/colorant"))
+        );
+    }
+
+    #[test]
+    fn cache_dir_falls_back_when_xdg_empty() {
+        // Empty XDG_CACHE_HOME is treated as unset — otherwise a stray
+        // `XDG_CACHE_HOME=` in the env would produce a relative cache
+        // path like `colorant/`, polluting the cwd.
+        let xdg = Some(String::new());
+        let home = Some(PathBuf::from("/home/me"));
+        assert_eq!(
+            cache_dir_for(xdg, home),
+            Some(PathBuf::from("/home/me/.cache/colorant"))
+        );
+    }
+
+    #[test]
+    fn cache_dir_falls_back_when_xdg_unset() {
+        let home = Some(PathBuf::from("/home/me"));
+        assert_eq!(
+            cache_dir_for(None, home),
+            Some(PathBuf::from("/home/me/.cache/colorant"))
+        );
+    }
+
+    #[test]
+    fn cache_dir_returns_none_when_no_home_and_no_xdg() {
+        assert_eq!(cache_dir_for(None, None), None);
+        assert_eq!(cache_dir_for(Some(String::new()), None), None);
+    }
+}
