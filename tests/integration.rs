@@ -23,6 +23,7 @@ fn run_in(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> (String, String, 
         "XDG_CONFIG_HOME",
         "TERM_PROGRAM",
         "TERM",
+        "NO_COLOR",
     ] {
         cmd.env_remove(var);
     }
@@ -819,6 +820,171 @@ fn doctor_explicit_path_that_doesnt_exist_errors_nonzero() {
         stderr.contains("reading") && stderr.contains("nope.colorantrc"),
         "expected anyhow context naming the file, got: {stderr:?}"
     );
+}
+
+#[test]
+fn show_prints_resolved_colors_with_rc_and_palette() {
+    let ws = make_workspace();
+    let (xdg, themes) = setup_xdg(&ws);
+    fs::write(
+        themes.join("ayu.colorant"),
+        "fg = #abcdef\nbg = #001122\ncolor0 = #112233\n",
+    )
+    .unwrap();
+    fs::write(
+        ws.path().join(".colorantrc"),
+        "extends = ayu\ncursor = #ff00ff\n",
+    )
+    .unwrap();
+
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["show"],
+        &[
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+            ("COLORANT_MODE", "dark"),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains("Active theme for"), "{stdout}");
+    assert!(stdout.contains("Mode: dark"), "{stdout}");
+    assert!(stdout.contains("#abcdef"), "{stdout}");
+    assert!(stdout.contains("#001122"), "{stdout}");
+    // The rc's own cursor key should override the palette (it had none).
+    assert!(stdout.contains("#ff00ff"), "{stdout}");
+    assert!(stdout.contains("color0"), "{stdout}");
+    assert!(stdout.contains("color15"), "{stdout}");
+    // Unset palette entries are flagged so the user can see what's missing.
+    assert!(stdout.contains("(unset)"), "{stdout}");
+}
+
+#[test]
+fn show_all_prints_both_modes() {
+    let ws = make_workspace();
+    let (xdg, themes) = setup_xdg(&ws);
+    fs::write(themes.join("dark-pal.colorant"), "fg = #000001\n").unwrap();
+    fs::write(themes.join("light-pal.colorant"), "fg = #fffffe\n").unwrap();
+    fs::write(
+        ws.path().join(".colorantrc"),
+        "extends.dark = dark-pal\nextends.light = light-pal\n",
+    )
+    .unwrap();
+
+    let (stdout, _, code) = run_in(
+        ws.path(),
+        &["show", "--all"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains("Dark mode:"), "{stdout}");
+    assert!(stdout.contains("Light mode:"), "{stdout}");
+    assert!(stdout.contains("#000001"), "{stdout}");
+    assert!(stdout.contains("#fffffe"), "{stdout}");
+    // With --all there's no "Mode:" line — the section headers do that job.
+    assert!(!stdout.contains("Mode: dark"), "{stdout}");
+}
+
+#[test]
+fn show_falls_back_to_default_theme_when_no_rc() {
+    let ws = make_workspace();
+    let (xdg, themes) = setup_xdg(&ws);
+    fs::write(themes.join("solo.colorant"), "fg = #777777\n").unwrap();
+    fs::write(
+        xdg.join("colorant").join("config.toml"),
+        "default_theme = \"solo\"\n",
+    )
+    .unwrap();
+
+    let nested = ws.path().join("a/b");
+    fs::create_dir_all(&nested).unwrap();
+    let (stdout, _, code) = run_in(
+        &nested,
+        &["show"],
+        &[
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+            ("COLORANT_MODE", "dark"),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains("Default theme: solo"), "{stdout}");
+    assert!(stdout.contains("#777777"), "{stdout}");
+}
+
+#[test]
+fn show_warns_when_default_theme_palette_is_missing() {
+    // default_theme names a palette that isn't installed. Without the
+    // warning, show would print the theme header followed by 19 (unset)
+    // rows with no explanation — which is the silent-failure pattern
+    // this tool exists to surface.
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    fs::write(
+        xdg.join("colorant").join("config.toml"),
+        "default_theme = \"ghost\"\n",
+    )
+    .unwrap();
+    let nested = ws.path().join("a/b");
+    fs::create_dir_all(&nested).unwrap();
+
+    let (stdout, _, code) = run_in(
+        &nested,
+        &["show"],
+        &[
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+            ("COLORANT_MODE", "dark"),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains("Default theme: ghost"), "{stdout}");
+    assert!(
+        stdout.contains("(palette file not found"),
+        "expected missing-palette warning, got: {stdout}"
+    );
+    assert!(stdout.contains("ghost.colorant"), "{stdout}");
+}
+
+#[test]
+fn show_with_no_rc_and_no_default_theme_prints_message() {
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let nested = ws.path().join("a/b");
+    fs::create_dir_all(&nested).unwrap();
+
+    let (stdout, _, code) = run_in(
+        &nested,
+        &["show"],
+        &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(
+        stdout.contains("No theme applies in this directory."),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn show_omits_ansi_escapes_when_piped() {
+    // Subprocess stdout is captured (not a TTY), so swatches should be
+    // plain block characters with no `\x1b[48;2;...m` codes.
+    let ws = make_workspace();
+    let (xdg, themes) = setup_xdg(&ws);
+    fs::write(themes.join("p.colorant"), "fg = #abcdef\n").unwrap();
+    fs::write(ws.path().join(".colorantrc"), "extends = p\n").unwrap();
+
+    let (stdout, _, _) = run_in(
+        ws.path(),
+        &["show"],
+        &[
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+            ("COLORANT_MODE", "dark"),
+        ],
+    );
+    assert!(
+        !stdout.contains("\x1b[38;2;"),
+        "expected no 24-bit color escapes in piped output: {stdout:?}"
+    );
+    // Block characters are still printed (kept visible for piped layout).
+    assert!(stdout.contains('█'), "{stdout}");
 }
 
 #[test]

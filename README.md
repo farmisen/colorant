@@ -99,6 +99,7 @@ the latter applies on your next prompt (your next command or Enter press).
 | `colorant init <shell>` | Print a shell-specific integration snippet to stdout, intended for `eval`. Currently `zsh` only. |
 | `colorant themes <action>` | Manage bundled palettes. `list` enumerates them (and marks which are installed); `install [<name>\|--all] [--force]` copies bundled palettes into the themes dir; `path` prints the resolved themes dir. |
 | `colorant doctor [path]` | Diagnose silent failures in a `.colorantrc`: unknown keys, invalid colors, malformed lines, unknown sections, and `extends` references whose palette files aren't on disk. Without `path`, walks up from the current directory like `current`. Exits 0 if nothing is wrong, 1 otherwise. |
+| `colorant show [--all]` | Print the resolved colors that would apply for the current directory — each slot with its hex code and a 24-bit swatch. Defaults to the current OS mode; `--all` prints both dark and light. |
 
 The `apply` command is what the shell hook calls on every `chpwd` /
 `precmd`; you generally don't need to invoke it manually unless debugging.

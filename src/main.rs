@@ -46,5 +46,9 @@ fn run() -> Result<ExitCode> {
             ExitCode::SUCCESS
         }
         cli::Command::Doctor { path } => commands::doctor::run(&config, path)?,
+        cli::Command::Show { all } => {
+            commands::show::run(&config, all)?;
+            ExitCode::SUCCESS
+        }
     })
 }
