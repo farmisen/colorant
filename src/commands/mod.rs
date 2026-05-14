@@ -9,5 +9,6 @@ pub mod current;
 pub mod doctor;
 pub mod init;
 pub mod reset;
+pub mod set;
 pub mod show;
 pub mod themes;
