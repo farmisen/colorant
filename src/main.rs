@@ -50,5 +50,9 @@ fn run() -> Result<ExitCode> {
             commands::show::run(&config, all)?;
             ExitCode::SUCCESS
         }
+        cli::Command::Set => {
+            commands::set::run(&config)?;
+            ExitCode::SUCCESS
+        }
     })
 }

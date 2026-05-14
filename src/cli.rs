@@ -61,6 +61,14 @@ pub enum Command {
         #[arg(long)]
         all: bool,
     },
+
+    /// Interactively pick themes and apply them to the current
+    /// directory's `.colorantrc`. Browses installed and bundled palettes
+    /// with a live preview; on apply, writes `extends` / `extends.dark` /
+    /// `extends.light` based on the slots you assigned, auto-installs
+    /// bundled themes that weren't yet on disk, and preserves any other
+    /// keys in the existing rc.
+    Set,
 }
 
 /// Sub-actions for the `themes` command group.
