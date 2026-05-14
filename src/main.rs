@@ -9,15 +9,42 @@ mod walk;
 
 use anyhow::Result;
 use clap::Parser;
+use std::process::ExitCode;
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<ExitCode> {
     let cli = cli::Cli::parse();
     let config = config::Config::load()?;
-    match cli.command {
-        cli::Command::Apply => commands::apply::run(&config),
-        cli::Command::Reset => commands::reset::run(),
-        cli::Command::Current => commands::current::run(),
-        cli::Command::Init { shell } => commands::init::run(shell),
-        cli::Command::Themes { action } => commands::themes::run(&config, action),
-    }
+    Ok(match cli.command {
+        cli::Command::Apply => {
+            commands::apply::run(&config)?;
+            ExitCode::SUCCESS
+        }
+        cli::Command::Reset => {
+            commands::reset::run()?;
+            ExitCode::SUCCESS
+        }
+        cli::Command::Current => {
+            commands::current::run()?;
+            ExitCode::SUCCESS
+        }
+        cli::Command::Init { shell } => {
+            commands::init::run(shell)?;
+            ExitCode::SUCCESS
+        }
+        cli::Command::Themes { action } => {
+            commands::themes::run(&config, action)?;
+            ExitCode::SUCCESS
+        }
+        cli::Command::Doctor { path } => commands::doctor::run(&config, path)?,
+    })
 }
