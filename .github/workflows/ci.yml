@@ -9,27 +9,39 @@ permissions:
   contents: read
 
 jobs:
+  # Primary test job — ubuntu is ~5× faster and ~10× cheaper than macOS
+  # for the same work. The only macOS-specific code (the `defaults read`
+  # shell-out in `mode::detect`) doesn't have meaningful test coverage
+  # anyway; integration tests force `COLORANT_MODE` explicitly.
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest]
+    name: test
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
-
       - uses: Swatinem/rust-cache@v2
-
       - name: fmt
         run: cargo fmt --all -- --check
-
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-
       - name: test
         run: cargo test --all-features
+
+  # Cheap macOS sanity check — just confirms the binary compiles on the
+  # target platform so a typo in `cfg(target_os = "macos")` code doesn't
+  # slip through. No `cargo test` because the macOS runner image keeps
+  # shipping a broken `cargo` shim, and we already cover behavior on linux.
+  build-macos:
+    name: build (macos-14)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --all-features
