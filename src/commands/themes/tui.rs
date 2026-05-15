@@ -11,10 +11,12 @@
 
 use crate::config::{Config, THEME_FILE_NAME};
 use crate::theme::bundled::BUNDLED_THEMES;
+use crate::theme::gogh;
 use crate::theme::model::{HexColor, ThemeLayer, ThemeName};
 use crate::theme::parse::{parse_palette_str, parse_rc_str};
 use crate::theme::rc::rewrite_extends;
 use crate::theme::resolve::PALETTE_EXTENSION;
+use crate::theme::source::Source;
 use anyhow::{Context, Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -33,11 +35,22 @@ use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 
 /// One row in the browseable theme list.
+///
+/// `origin` is where the theme is known from — `Some(Bundled)` /
+/// `Some(Gogh)` for entries that appeared in a catalog, `None` for
+/// installed-on-disk palettes whose origin we can't determine.
+///
+/// `layer` is `Some` when we have the colors loaded — either eagerly
+/// (bundled / installed) or after a successful lazy fetch (gogh). It's
+/// `None` for gogh entries that haven't been fetched yet during this TUI
+/// session. `fetch_failed` short-circuits retries on every navigation
+/// when a fetch errored (typically: offline).
 struct ThemeEntry {
     name: ThemeName,
-    layer: ThemeLayer,
+    origin: Option<Source>,
+    layer: Option<ThemeLayer>,
     installed: bool,
-    bundled: bool,
+    fetch_failed: bool,
 }
 
 /// Which slot a theme is currently assigned to. A single theme can occupy
@@ -139,8 +152,21 @@ impl Picks {
 
 struct App {
     themes: Vec<ThemeEntry>,
+    /// Indices into `themes` for the rows currently shown in the list,
+    /// reflecting `source_filter` + `filter`. The list cursor (`list_state`)
+    /// indexes into this `visible` slice, not into `themes` directly.
+    /// Recomputed by [`App::recompute_visible`] whenever a filter changes.
+    visible: Vec<usize>,
     list_state: ListState,
     picks: Picks,
+    /// Source filter cycle: `None` = all sources, `Some(s)` = restrict to `s`.
+    source_filter: Option<Source>,
+    /// Case-insensitive substring filter applied to theme names. Empty
+    /// means no text filter.
+    filter: String,
+    /// True while the user is typing into the filter input (`/` mode).
+    /// Key handling routes differently in this mode.
+    editing_filter: bool,
     rc_path: PathBuf,
     themes_dir: PathBuf,
     /// Filled in only on apply: the path actually written, for the final
@@ -149,24 +175,79 @@ struct App {
 }
 
 impl App {
+    /// Theme at the current cursor position, if any. Resolves through
+    /// the visible-index cache so we honor the active filter.
     fn selected(&self) -> Option<&ThemeEntry> {
-        self.list_state.selected().and_then(|i| self.themes.get(i))
+        let v = self.list_state.selected()?;
+        let i = *self.visible.get(v)?;
+        self.themes.get(i)
+    }
+
+    /// Original (themes-vec) index of the currently selected entry.
+    fn selected_theme_idx(&self) -> Option<usize> {
+        let v = self.list_state.selected()?;
+        self.visible.get(v).copied()
     }
 
     fn assign_selected_to<F: FnOnce(&mut Picks, usize)>(&mut self, set: F) {
-        if let Some(i) = self.list_state.selected() {
+        if let Some(i) = self.selected_theme_idx() {
             set(&mut self.picks, i);
         }
     }
 
     fn move_cursor(&mut self, delta: isize) {
-        if self.themes.is_empty() {
+        if self.visible.is_empty() {
             return;
         }
         let cur = self.list_state.selected().unwrap_or(0) as isize;
-        let len = self.themes.len() as isize;
+        let len = self.visible.len() as isize;
         let next = (cur + delta).rem_euclid(len);
         self.list_state.select(Some(next as usize));
+    }
+
+    /// Rebuild `visible` based on the current source + text filters. Keeps
+    /// the cursor on the same theme when it survives the filter; otherwise
+    /// clamps to the first matching row.
+    fn recompute_visible(&mut self) {
+        let prior_theme_idx = self.selected_theme_idx();
+        let needle = self.filter.to_lowercase();
+        self.visible = self
+            .themes
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                if let Some(src) = self.source_filter
+                    && t.origin != Some(src)
+                {
+                    return false;
+                }
+                if !needle.is_empty() && !t.name.as_str().to_lowercase().contains(&needle) {
+                    return false;
+                }
+                true
+            })
+            .map(|(i, _)| i)
+            .collect();
+        // Try to preserve the prior selection; else snap to row 0 (or
+        // None when the filter eliminated every row).
+        let new_pos = prior_theme_idx
+            .and_then(|t| self.visible.iter().position(|i| *i == t))
+            .or(if self.visible.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
+        self.list_state.select(new_pos);
+    }
+
+    /// Cycle the source filter: None → Bundled → Gogh → None → …
+    fn cycle_source_filter(&mut self) {
+        self.source_filter = match self.source_filter {
+            None => Some(Source::Bundled),
+            Some(Source::Bundled) => Some(Source::Gogh),
+            Some(Source::Gogh) => None,
+        };
+        self.recompute_visible();
     }
 
     fn picks_summary(&self) -> Vec<String> {
@@ -244,16 +325,17 @@ pub fn run(config: &Config) -> Result<()> {
 
     let mut app = App {
         themes,
-        list_state: {
-            let mut s = ListState::default();
-            s.select(Some(0));
-            s
-        },
+        visible: Vec::new(),
+        list_state: ListState::default(),
         picks,
+        source_filter: None,
+        filter: String::new(),
+        editing_filter: false,
         rc_path,
         themes_dir: config.base_theme_dir.clone(),
         applied: None,
     };
+    app.recompute_visible();
 
     // Install a panic hook that restores the terminal before the panic
     // unwinds. Without this, a panic anywhere in the draw/event path
@@ -321,26 +403,105 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
             // size. Without this match arm, the TUI would stay frozen on
             // the old size until a key was pressed.
             Event::Resize(_, _) => continue,
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char('j') | KeyCode::Down => app.move_cursor(1),
-                KeyCode::Char('k') | KeyCode::Up => app.move_cursor(-1),
-                KeyCode::Char('g') | KeyCode::Home => app.list_state.select(Some(0)),
-                KeyCode::Char('G') | KeyCode::End => {
-                    let last = app.themes.len().saturating_sub(1);
-                    app.list_state.select(Some(last));
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if app.editing_filter {
+                    handle_filter_key(app, key.code);
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            app.move_cursor(1);
+                            ensure_loaded_selected(app);
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            app.move_cursor(-1);
+                            ensure_loaded_selected(app);
+                        }
+                        KeyCode::Char('g') | KeyCode::Home if !app.visible.is_empty() => {
+                            app.list_state.select(Some(0));
+                            ensure_loaded_selected(app);
+                        }
+                        KeyCode::Char('G') | KeyCode::End if !app.visible.is_empty() => {
+                            let last = app.visible.len().saturating_sub(1);
+                            app.list_state.select(Some(last));
+                            ensure_loaded_selected(app);
+                        }
+                        KeyCode::Char('b') => app.assign_selected_to(|p, i| p.toggle_both(i)),
+                        KeyCode::Char('d') => app.assign_selected_to(|p, i| p.toggle_dark(i)),
+                        KeyCode::Char('l') => app.assign_selected_to(|p, i| p.toggle_light(i)),
+                        KeyCode::Char('c') => app.picks.clear(),
+                        KeyCode::Char('s') => app.cycle_source_filter(),
+                        KeyCode::Char('/') => {
+                            app.editing_filter = true;
+                        }
+                        KeyCode::Enter => {
+                            apply(app)?;
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
                 }
-                KeyCode::Char('b') => app.assign_selected_to(|p, i| p.toggle_both(i)),
-                KeyCode::Char('d') => app.assign_selected_to(|p, i| p.toggle_dark(i)),
-                KeyCode::Char('l') => app.assign_selected_to(|p, i| p.toggle_light(i)),
-                KeyCode::Char('c') => app.picks.clear(),
-                KeyCode::Enter => {
-                    apply(app)?;
-                    return Ok(());
-                }
-                _ => {}
-            },
+            }
             _ => {}
+        }
+    }
+}
+
+/// Key handling while `/` filter mode is active. Typing appends to the
+/// filter, backspace removes a char, Esc cancels (clears the filter and
+/// exits), Enter commits (keeps the filter but exits the input mode).
+fn handle_filter_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            app.filter.clear();
+            app.editing_filter = false;
+            app.recompute_visible();
+            ensure_loaded_selected(app);
+        }
+        KeyCode::Enter => {
+            app.editing_filter = false;
+            ensure_loaded_selected(app);
+        }
+        KeyCode::Backspace => {
+            app.filter.pop();
+            app.recompute_visible();
+        }
+        KeyCode::Char(c) => {
+            app.filter.push(c);
+            app.recompute_visible();
+        }
+        _ => {}
+    }
+}
+
+/// Ensure the currently-selected theme has its palette loaded. For Gogh
+/// entries whose layer hasn't been fetched yet, this issues one network
+/// request and caches the result back into the entry. Errors set
+/// `fetch_failed` so we don't retry on every navigation — the preview
+/// shows "(preview unavailable — offline?)" until the user re-navigates
+/// to a working entry.
+fn ensure_loaded_selected(app: &mut App) {
+    let Some(idx) = app.selected_theme_idx() else {
+        return;
+    };
+    let entry = &app.themes[idx];
+    if entry.layer.is_some() || entry.fetch_failed {
+        return;
+    }
+    let Some(Source::Gogh) = entry.origin else {
+        return; // Nothing to do for non-remote sources.
+    };
+    let name = entry.name.as_str().to_string();
+    match gogh::fetch(&name) {
+        Ok(palette) => {
+            if let Some(e) = app.themes.get_mut(idx) {
+                e.layer = Some(palette.layer);
+            }
+        }
+        Err(_) => {
+            if let Some(e) = app.themes.get_mut(idx) {
+                e.fetch_failed = true;
+            }
         }
     }
 }
@@ -370,22 +531,35 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     draw_theme_list(frame, app, main[0]);
     draw_preview(frame, app, main[1]);
     draw_status(frame, app, chunks[1]);
-    draw_keybinds(frame, chunks[2]);
+    draw_keybinds(frame, app, chunks[2]);
 }
 
 fn draw_theme_list(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
-        .themes
+        .visible
         .iter()
-        .enumerate()
-        .map(|(i, t)| {
+        .map(|&i| {
+            let t = &app.themes[i];
             let installed = if t.installed { "*" } else { " " };
+            // Short single-letter source marker before the name so users
+            // can tell bundled from remote at a glance.
+            let origin_marker = match t.origin {
+                Some(Source::Bundled) => "B",
+                Some(Source::Gogh) => "G",
+                None => "·",
+            };
             let tag = app.picks.slot_tag(i);
-            ListItem::new(format!("{installed} {}{tag}", t.name))
+            ListItem::new(format!("{installed}{origin_marker} {}{tag}", t.name))
         })
         .collect();
 
-    let title = format!(" Themes ({}) ", app.themes.len());
+    // Title reflects the current source filter so the user knows what
+    // they're looking at when the list is shorter than expected.
+    let source_label = match app.source_filter {
+        None => "all".to_string(),
+        Some(s) => s.to_string(),
+    };
+    let title = format!(" Themes ({} / {source_label}) ", app.visible.len());
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
@@ -416,15 +590,28 @@ fn draw_preview(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         return;
     };
 
-    let mut lines: Vec<Line> = vec![
-        swatch_line("fg", theme.layer.fg.as_ref()),
-        swatch_line("bg", theme.layer.bg.as_ref()),
-        swatch_line("cursor", theme.layer.cursor.as_ref()),
-        Line::default(),
-    ];
-    for i in 0..8 {
-        lines.push(palette_row(theme, i));
-    }
+    let lines: Vec<Line> = match (&theme.layer, theme.fetch_failed) {
+        (Some(layer), _) => {
+            let mut out = vec![
+                swatch_line("fg", layer.fg.as_ref()),
+                swatch_line("bg", layer.bg.as_ref()),
+                swatch_line("cursor", layer.cursor.as_ref()),
+                Line::default(),
+            ];
+            for i in 0..8 {
+                out.push(palette_row(layer, i));
+            }
+            out
+        }
+        (None, true) => vec![Line::from(Span::styled(
+            "  (preview unavailable — offline?)",
+            Style::default().fg(Color::DarkGray),
+        ))],
+        (None, false) => vec![Line::from(Span::styled(
+            "  (palette not loaded yet)",
+            Style::default().fg(Color::DarkGray),
+        ))],
+    };
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
@@ -457,15 +644,32 @@ fn draw_status(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_keybinds(frame: &mut ratatui::Frame, area: Rect) {
-    let text = "j/k=nav  b=both  d=dark  l=light  c=clear  enter=apply  q=quit";
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            text,
+fn draw_keybinds(frame: &mut ratatui::Frame, app: &App, area: Rect) {
+    // While the filter input is active, show a different hint and the
+    // current filter buffer so the user can see what they're typing.
+    let line = if app.editing_filter {
+        Line::from(vec![
+            Span::styled("/", Style::default().fg(Color::Yellow)),
+            Span::raw(app.filter.clone()),
+            Span::styled(
+                "    (esc=cancel  enter=commit)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        let filter_indicator = if app.filter.is_empty() {
+            String::new()
+        } else {
+            format!("  /{}  ", app.filter)
+        };
+        Line::from(Span::styled(
+            format!(
+                "j/k=nav  b=both  d=dark  l=light  c=clear  /=filter  s=source  enter=apply  q=quit{filter_indicator}"
+            ),
             Style::default().fg(Color::DarkGray),
-        ))),
-        area,
-    );
+        ))
+    };
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn swatch_line(name: &str, color: Option<&HexColor>) -> Line<'static> {
@@ -484,9 +688,9 @@ fn swatch_line(name: &str, color: Option<&HexColor>) -> Line<'static> {
     Line::from(spans)
 }
 
-fn palette_row(theme: &ThemeEntry, row: usize) -> Line<'static> {
-    let left = swatch_inline(&color_name(row), theme.layer.palette[row].as_ref());
-    let right = swatch_inline(&color_name(row + 8), theme.layer.palette[row + 8].as_ref());
+fn palette_row(layer: &ThemeLayer, row: usize) -> Line<'static> {
+    let left = swatch_inline(&color_name(row), layer.palette[row].as_ref());
+    let right = swatch_inline(&color_name(row + 8), layer.palette[row + 8].as_ref());
     let mut spans = Vec::with_capacity(left.len() + right.len() + 1);
     spans.extend(left);
     spans.push(Span::raw("   "));
@@ -531,16 +735,23 @@ fn apply(app: &mut App) -> Result<()> {
     }
 
     let (both_idx, dark_idx, light_idx) = app.picks.effective();
-    // Auto-install bundled palettes that haven't been copied to disk yet.
+    // Install any picked theme that isn't yet on disk: bundled themes are
+    // copied from the in-memory blob; gogh themes are fetched if their
+    // palette hasn't already been loaded into the entry during browsing.
     for i in [both_idx, dark_idx, light_idx].into_iter().flatten() {
         let theme = &app.themes[i];
-        if !theme.installed && theme.bundled {
-            install_bundled_palette(&theme.name, &app.themes_dir)?;
-        } else if !theme.installed && !theme.bundled {
-            return Err(anyhow!(
-                "theme {} is not installed and not bundled",
-                theme.name
-            ));
+        if theme.installed {
+            continue;
+        }
+        match theme.origin {
+            Some(Source::Bundled) => install_bundled_palette(&theme.name, &app.themes_dir)?,
+            Some(Source::Gogh) => install_gogh_palette(theme, &app.themes_dir)?,
+            None => {
+                return Err(anyhow!(
+                    "theme {} is not installed and has no known origin",
+                    theme.name
+                ));
+            }
         }
     }
 
@@ -629,29 +840,102 @@ fn install_bundled_palette(name: &ThemeName, themes_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build the merged installed + bundled theme list, sorted by name.
+/// Install a Gogh palette into `themes_dir`. Reuses the already-fetched
+/// layer when the user previewed it during this TUI session (no extra
+/// network); otherwise fetches now. The written file is colorant's flat
+/// `.colorant` format — same shape `parse_palette_str` reads.
+fn install_gogh_palette(entry: &ThemeEntry, themes_dir: &Path) -> Result<()> {
+    let layer = match &entry.layer {
+        Some(l) => l.clone(),
+        None => {
+            gogh::fetch(entry.name.as_str())
+                .with_context(|| format!("fetching gogh theme {}", entry.name))?
+                .layer
+        }
+    };
+    fs::create_dir_all(themes_dir)
+        .with_context(|| format!("creating themes dir {}", themes_dir.display()))?;
+    let dest = themes_dir.join(format!("{}.{}", entry.name, PALETTE_EXTENSION));
+    let content = render_palette_layer(&layer);
+    fs::write(&dest, content).with_context(|| format!("writing {}", dest.display()))?;
+    Ok(())
+}
+
+/// Render a `ThemeLayer` as the flat `.colorant` key/value format used on
+/// disk. Skips slots that aren't set so a partial Gogh theme rounds-trips
+/// without empty `colorN = ` lines.
+fn render_palette_layer(layer: &ThemeLayer) -> String {
+    let mut out = String::new();
+    if let Some(c) = &layer.fg {
+        out.push_str(&format!("fg = {}\n", c.as_str()));
+    }
+    if let Some(c) = &layer.bg {
+        out.push_str(&format!("bg = {}\n", c.as_str()));
+    }
+    if let Some(c) = &layer.cursor {
+        out.push_str(&format!("cursor = {}\n", c.as_str()));
+    }
+    for (i, slot) in layer.palette.iter().enumerate() {
+        if let Some(c) = slot {
+            out.push_str(&format!("color{i} = {}\n", c.as_str()));
+        }
+    }
+    out
+}
+
+/// Build the merged theme list from every known source (bundled, gogh
+/// cache, and what's already installed under `base_theme_dir`). Sorted by
+/// name. Installed entries override catalog entries so the preview
+/// reflects whatever's actually on disk.
+///
+/// Gogh themes whose names can't be ThemeName-parsed (spaces, parens, …)
+/// are dropped at this stage — they'd fail later when written to the rc.
+/// TODO: relax `ThemeName` to accept Gogh's broader naming so we don't
+/// strand entries like `3024 Day` or `Flatland (Palenight)`.
 fn load_themes(config: &Config) -> Result<Vec<ThemeEntry>> {
     let mut entries: BTreeMap<String, ThemeEntry> = BTreeMap::new();
+    let mut gogh_skipped: usize = 0;
 
-    // Bundled (compiled in).
+    // Bundled (compiled in). Loaded eagerly — they're already in memory.
     for (name, content) in BUNDLED_THEMES {
         let Ok(theme_name) = ThemeName::parse(name) else {
             continue;
         };
-        let layer = parse_palette_str(content).layer;
         entries.insert(
             name.to_string(),
             ThemeEntry {
                 name: theme_name,
-                layer,
+                origin: Some(Source::Bundled),
+                layer: Some(parse_palette_str(content).layer),
                 installed: false,
-                bundled: true,
+                fetch_failed: false,
             },
         );
     }
 
-    // Installed on disk under base_theme_dir. Overrides bundled with the
-    // disk version so user edits show up in the preview.
+    // Gogh themes from the cached catalog (no network here — `themes sync`
+    // populated it). The palette stays unloaded; we fetch lazily when the
+    // user navigates to one. Bundled themes with the same name keep their
+    // entry — `or_insert` doesn't overwrite.
+    if let Ok(Some(names)) = gogh::cached_names() {
+        for name in names {
+            let Ok(theme_name) = ThemeName::parse(&name) else {
+                gogh_skipped += 1;
+                continue;
+            };
+            entries.entry(name.clone()).or_insert(ThemeEntry {
+                name: theme_name,
+                origin: Some(Source::Gogh),
+                layer: None,
+                installed: false,
+                fetch_failed: false,
+            });
+        }
+    }
+
+    // Installed on disk under base_theme_dir. Overrides anything above
+    // with the on-disk content (so user edits to a bundled theme show
+    // through). Origin is preserved when the name matches a catalog entry.
     if config.base_theme_dir.is_dir() {
         for entry in fs::read_dir(&config.base_theme_dir)
             .with_context(|| format!("reading themes dir {}", config.base_theme_dir.display()))?
@@ -669,18 +953,32 @@ fn load_themes(config: &Config) -> Result<Vec<ThemeEntry>> {
             };
             let content =
                 fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-            let layer = parse_palette_str(&content).layer;
-            let bundled = BUNDLED_THEMES.iter().any(|(n, _)| *n == stem);
+            let prior_origin = entries.get(stem).and_then(|e| e.origin);
+            let origin = prior_origin.or_else(|| {
+                if BUNDLED_THEMES.iter().any(|(n, _)| *n == stem) {
+                    Some(Source::Bundled)
+                } else {
+                    None
+                }
+            });
             entries.insert(
                 stem.to_string(),
                 ThemeEntry {
                     name,
-                    layer,
+                    origin,
+                    layer: Some(parse_palette_str(&content).layer),
                     installed: true,
-                    bundled,
+                    fetch_failed: false,
                 },
             );
         }
+    }
+
+    if gogh_skipped > 0 {
+        eprintln!(
+            "note: {gogh_skipped} gogh theme(s) skipped (names contain characters \
+             colorant can't yet handle, e.g. spaces or parens)"
+        );
     }
 
     Ok(entries.into_values().collect())
@@ -798,9 +1096,10 @@ mod tests {
     fn make_theme(name: &str) -> ThemeEntry {
         ThemeEntry {
             name: ThemeName::parse(name).unwrap(),
-            layer: ThemeLayer::default(),
+            origin: Some(Source::Bundled),
+            layer: Some(ThemeLayer::default()),
             installed: false,
-            bundled: true,
+            fetch_failed: false,
         }
     }
 
@@ -903,23 +1202,30 @@ mod tests {
         let themes = vec![
             ThemeEntry {
                 name: ThemeName::parse("ayu").unwrap(),
-                layer: ThemeLayer::default(),
+                origin: None,
+                layer: Some(ThemeLayer::default()),
                 installed: true,
-                bundled: false,
+                fetch_failed: false,
             },
             ThemeEntry {
                 name: ThemeName::parse("nord").unwrap(),
-                layer: ThemeLayer::default(),
+                origin: None,
+                layer: Some(ThemeLayer::default()),
                 installed: true,
-                bundled: false,
+                fetch_failed: false,
             },
         ];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
+        let visible: Vec<usize> = (0..themes.len()).collect();
         App {
             themes,
+            visible,
             list_state,
             picks,
+            source_filter: None,
+            filter: String::new(),
+            editing_filter: false,
             rc_path: tmp.join(".colorantrc"),
             themes_dir: tmp.join("themes"),
             applied: None,
@@ -974,18 +1280,140 @@ mod tests {
     }
 
     #[test]
-    fn apply_errors_when_theme_missing_and_not_bundled() {
+    fn apply_errors_when_theme_missing_and_origin_unknown() {
         let dir = tempdir().unwrap();
         let mut picks = Picks::default();
         picks.toggle_both(0);
         let mut app = make_app_with_picks(picks, dir.path());
-        // Force the theme to look uninstalled + not bundled so apply has
-        // to error rather than auto-install.
+        // Force the theme to look uninstalled with no known origin —
+        // apply should error rather than fabricate one.
         app.themes[0].installed = false;
-        app.themes[0].bundled = false;
+        app.themes[0].origin = None;
         let err = apply(&mut app).unwrap_err();
-        assert!(err.to_string().contains("not installed and not bundled"));
+        assert!(err.to_string().contains("no known origin"));
         // No partial write.
         assert!(!app.rc_path.exists());
+    }
+
+    // --- filter + source cycle ---
+
+    fn entry(name: &str, origin: Option<Source>) -> ThemeEntry {
+        ThemeEntry {
+            name: ThemeName::parse(name).unwrap(),
+            origin,
+            layer: Some(ThemeLayer::default()),
+            installed: false,
+            fetch_failed: false,
+        }
+    }
+
+    fn app_with_themes(themes: Vec<ThemeEntry>) -> App {
+        let visible: Vec<usize> = (0..themes.len()).collect();
+        let mut state = ListState::default();
+        if !themes.is_empty() {
+            state.select(Some(0));
+        }
+        let mut app = App {
+            themes,
+            visible,
+            list_state: state,
+            picks: Picks::default(),
+            source_filter: None,
+            filter: String::new(),
+            editing_filter: false,
+            rc_path: PathBuf::from("/tmp/.colorantrc"),
+            themes_dir: PathBuf::from("/tmp/themes"),
+            applied: None,
+        };
+        app.recompute_visible();
+        app
+    }
+
+    #[test]
+    fn cycle_source_filter_rotates_none_bundled_gogh() {
+        let mut app = app_with_themes(vec![
+            entry("alpha", Some(Source::Bundled)),
+            entry("beta", Some(Source::Gogh)),
+            entry("gamma", None),
+        ]);
+        assert_eq!(app.source_filter, None);
+        app.cycle_source_filter();
+        assert_eq!(app.source_filter, Some(Source::Bundled));
+        // Visible drops to only the bundled entry (alpha).
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.themes[app.visible[0]].name.as_str(), "alpha");
+        app.cycle_source_filter();
+        assert_eq!(app.source_filter, Some(Source::Gogh));
+        assert_eq!(app.themes[app.visible[0]].name.as_str(), "beta");
+        app.cycle_source_filter();
+        assert_eq!(app.source_filter, None);
+        assert_eq!(app.visible.len(), 3);
+    }
+
+    #[test]
+    fn text_filter_narrows_visible_case_insensitively() {
+        let mut app = app_with_themes(vec![
+            entry("Catppuccin-Mocha", Some(Source::Bundled)),
+            entry("catppuccin-latte", Some(Source::Bundled)),
+            entry("tokyo-night", Some(Source::Bundled)),
+        ]);
+        app.filter = "MOCHA".to_string();
+        app.recompute_visible();
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.themes[app.visible[0]].name.as_str(), "Catppuccin-Mocha");
+    }
+
+    #[test]
+    fn text_filter_and_source_filter_combine() {
+        let mut app = app_with_themes(vec![
+            entry("catppuccin-mocha", Some(Source::Bundled)),
+            entry("catppuccin-mocha-2", Some(Source::Gogh)),
+            entry("tokyo-night", Some(Source::Bundled)),
+        ]);
+        app.source_filter = Some(Source::Bundled);
+        app.filter = "catppuccin".to_string();
+        app.recompute_visible();
+        // Only the bundled catppuccin survives — gogh is filtered out
+        // by source, tokyo is filtered out by text.
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.themes[app.visible[0]].name.as_str(), "catppuccin-mocha");
+    }
+
+    #[test]
+    fn recompute_visible_preserves_cursor_when_possible() {
+        let mut app = app_with_themes(vec![
+            entry("alpha", Some(Source::Bundled)),
+            entry("beta", Some(Source::Bundled)),
+            entry("gamma", Some(Source::Bundled)),
+        ]);
+        app.list_state.select(Some(1)); // beta
+        app.filter = "bet".to_string();
+        app.recompute_visible();
+        // beta survives, cursor stays on it (now row 0 since list shrank).
+        assert_eq!(app.list_state.selected(), Some(0));
+        assert_eq!(app.themes[app.visible[0]].name.as_str(), "beta");
+    }
+
+    #[test]
+    fn recompute_visible_clamps_when_cursor_filtered_out() {
+        let mut app = app_with_themes(vec![
+            entry("alpha", Some(Source::Bundled)),
+            entry("beta", Some(Source::Bundled)),
+        ]);
+        app.list_state.select(Some(1)); // beta
+        app.filter = "alph".to_string();
+        app.recompute_visible();
+        // beta got filtered out; cursor snaps to first surviving row.
+        assert_eq!(app.list_state.selected(), Some(0));
+        assert_eq!(app.themes[app.visible[0]].name.as_str(), "alpha");
+    }
+
+    #[test]
+    fn recompute_visible_with_no_matches_clears_cursor() {
+        let mut app = app_with_themes(vec![entry("alpha", Some(Source::Bundled))]);
+        app.filter = "definitely-no-match".to_string();
+        app.recompute_visible();
+        assert!(app.visible.is_empty());
+        assert_eq!(app.list_state.selected(), None);
     }
 }
