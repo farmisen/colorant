@@ -74,8 +74,17 @@ pub enum Command {
 /// Sub-actions for the `themes` command group.
 #[derive(Debug, Subcommand)]
 pub enum ThemesAction {
-    /// List bundled palettes, marking which are already installed.
-    List,
+    /// List themes from one or all sources, marking which are already
+    /// installed locally.
+    List {
+        /// Restrict to a single source (e.g. `bundled`, `gogh`). Omit to
+        /// list every source.
+        #[arg(long)]
+        source: Option<String>,
+        /// Only show themes that are installed in the local themes dir.
+        #[arg(long)]
+        installed: bool,
+    },
 
     /// Copy bundled palettes into the user's themes directory.
     ///
@@ -103,6 +112,42 @@ pub enum ThemesAction {
 
     /// Print the configured themes directory.
     Path,
+
+    /// Search for themes by name across known sources (bundled + remote).
+    /// Remote sources must be `sync`'d first for their themes to show up.
+    Search {
+        /// Substring to match (case-insensitive).
+        query: String,
+        /// Restrict to a single source (e.g. `bundled`, `gogh`).
+        #[arg(long)]
+        source: Option<String>,
+    },
+
+    /// Refresh the cached catalog for remote sources (`gogh`). Network
+    /// only happens during this command.
+    Sync {
+        /// Restrict to a single source. Omit to sync every remote.
+        #[arg(long)]
+        source: Option<String>,
+    },
+
+    /// Apply themes to the current directory's `.colorantrc`, writing
+    /// `extends` / `extends.dark` / `extends.light` as needed. Themes
+    /// that aren't yet installed (bundled or fetched from a remote) are
+    /// installed automatically. Other keys in the rc are preserved.
+    Apply {
+        /// Theme to apply to both modes (`extends = <name>`). Optional;
+        /// pass `--dark`/`--light` instead to set them separately.
+        /// Source can be specified via `gogh:<name>` syntax.
+        #[arg(conflicts_with_all = ["dark", "light"])]
+        name: Option<String>,
+        /// Theme for dark mode (`extends.dark = <name>`).
+        #[arg(long)]
+        dark: Option<String>,
+        /// Theme for light mode (`extends.light = <name>`).
+        #[arg(long)]
+        light: Option<String>,
+    },
 }
 
 /// The shell selector accepted by `colorant init <shell>`.

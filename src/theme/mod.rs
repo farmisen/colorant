@@ -7,6 +7,9 @@
 //! given mode, walking the `extends` chain along the way.
 
 pub(crate) mod bundled;
+pub mod gogh;
 pub mod model;
 pub mod parse;
+pub mod rc;
 pub mod resolve;
+pub mod source;
