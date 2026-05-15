@@ -15,11 +15,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pinned to macos-14 (not macos-latest) because the latest tag
-        # has been intermittently shipping a runner image where the
-        # rustup shim resolves `cargo` to `rustup-init`, breaking
-        # `cargo fmt --check` despite `dtolnay/rust-toolchain@stable`
-        # reporting success. Bump when GitHub retires macos-14.
         os: [macos-14]
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +22,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      # The macOS runner ships a Homebrew-installed `cargo` that's actually
+      # a rustup-init bootstrap shim — it shadows the real cargo dtolnay
+      # installs into ~/.cargo/bin. Forcing our bin to the front of PATH
+      # fixes `cargo fmt`/`clippy`/etc. resolving to rustup-init and erroring
+      # with "unexpected argument 'fmt' found".
+      - name: Prepend ~/.cargo/bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2
 
