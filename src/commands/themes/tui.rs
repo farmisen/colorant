@@ -349,7 +349,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     let area = frame.area();
     let outer = Block::default()
         .borders(Borders::ALL)
-        .title(" colorant set ");
+        .title(" colorant themes ");
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
