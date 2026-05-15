@@ -38,10 +38,15 @@ pub enum Command {
         shell: Shell,
     },
 
-    /// Manage bundled palettes (list, install, locate the themes dir).
+    /// Manage themes from bundled and remote sources. With a subcommand,
+    /// runs that operation non-interactively (`list`, `search`, `sync`,
+    /// `apply`, `install`, `path`). With no subcommand, opens an
+    /// interactive TUI that browses every known source with a live
+    /// preview, lets you filter and pick, and writes the chosen
+    /// `extends` keys into the cwd's `.colorantrc` on apply.
     Themes {
         #[command(subcommand)]
-        action: ThemesAction,
+        action: Option<ThemesAction>,
     },
 
     /// Diagnose silent failures in a .colorantrc: unknown keys, invalid
@@ -61,14 +66,6 @@ pub enum Command {
         #[arg(long)]
         all: bool,
     },
-
-    /// Interactively pick themes and apply them to the current
-    /// directory's `.colorantrc`. Browses installed and bundled palettes
-    /// with a live preview; on apply, writes `extends` / `extends.dark` /
-    /// `extends.light` based on the slots you assigned, auto-installs
-    /// bundled themes that weren't yet on disk, and preserves any other
-    /// keys in the existing rc.
-    Set,
 }
 
 /// Sub-actions for the `themes` command group.

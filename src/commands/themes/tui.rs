@@ -1,12 +1,13 @@
-//! `colorant set` — interactive theme picker.
+//! Interactive TUI for `colorant themes` (no sub-action).
 //!
-//! Launches a ratatui TUI that lists installed and bundled palettes with a
-//! live preview of each palette's colors. The user assigns themes to one
-//! or more of three slots — `both` / `dark` / `light` — and on apply the
-//! cwd's `.colorantrc` is updated with the corresponding `extends` /
-//! `extends.dark` / `extends.light` keys. Other keys in the rc are
-//! preserved. Bundled themes that aren't yet installed on disk are copied
-//! into `base_theme_dir` automatically as part of apply.
+//! Launches a ratatui app that lists themes from every known source —
+//! installed (in `base_theme_dir`), bundled (compiled in), and remote
+//! (Gogh, when its catalog has been synced) — with a live preview of
+//! each palette's colors. The user assigns themes to one or more of
+//! three slots — `both` / `dark` / `light` — and on apply the cwd's
+//! `.colorantrc` is updated with the corresponding `extends*` keys.
+//! Themes that aren't yet on disk (bundled or remote) get installed
+//! as part of apply. Other keys in the rc are preserved.
 
 use crate::config::{Config, THEME_FILE_NAME};
 use crate::theme::bundled::BUNDLED_THEMES;
@@ -348,7 +349,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     let area = frame.area();
     let outer = Block::default()
         .borders(Borders::ALL)
-        .title(" colorant set ");
+        .title(" colorant themes ");
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
