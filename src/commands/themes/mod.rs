@@ -1,6 +1,7 @@
 //! `colorant themes` — manage themes from bundled and remote sources.
 //!
-//! Sub-actions:
+//! With no sub-action, opens the interactive TUI in [`tui`]. With one,
+//! dispatches to the corresponding non-interactive operation:
 //! - `list` (with `--source` / `--installed`): show available themes.
 //! - `install` (bundled only): copy a bundled palette onto disk. Kept for
 //!   bulk first-time setup (`--all`); single-name installs are usually
@@ -10,6 +11,8 @@
 //! - `sync`: refresh remote-source catalog caches (Gogh).
 //! - `apply`: write `extends*` keys to the cwd's `.colorantrc`,
 //!   auto-installing any required palette (bundled or remote).
+
+pub mod tui;
 
 use crate::cli::ThemesAction;
 use crate::config::Config;
@@ -25,14 +28,15 @@ use std::path::{Path, PathBuf};
 
 const RC_FILE_NAME: &str = ".colorantrc";
 
-pub fn run(config: &Config, action: ThemesAction) -> Result<()> {
+pub fn run(config: &Config, action: Option<ThemesAction>) -> Result<()> {
     match action {
-        ThemesAction::List { source, installed } => run_list(config, source, installed),
-        ThemesAction::Install { name, all, force } => run_install(config, name, all, force),
-        ThemesAction::Path => run_path(config),
-        ThemesAction::Search { query, source } => run_search(config, &query, source),
-        ThemesAction::Sync { source } => run_sync(source),
-        ThemesAction::Apply { name, dark, light } => run_apply(config, name, dark, light),
+        None => tui::run(config),
+        Some(ThemesAction::List { source, installed }) => run_list(config, source, installed),
+        Some(ThemesAction::Install { name, all, force }) => run_install(config, name, all, force),
+        Some(ThemesAction::Path) => run_path(config),
+        Some(ThemesAction::Search { query, source }) => run_search(config, &query, source),
+        Some(ThemesAction::Sync { source }) => run_sync(source),
+        Some(ThemesAction::Apply { name, dark, light }) => run_apply(config, name, dark, light),
     }
 }
 
