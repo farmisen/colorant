@@ -11,8 +11,9 @@ active theme follows on the next shell prompt.
 
 ## Status
 
-Early development. v1 scope: Ghostty + zsh + macOS. Other terminals, shells,
-and OSes will land incrementally.
+Early development. Supported terminals: Ghostty and iTerm2 on macOS, driven
+from zsh. Other terminals (Kitty, WezTerm, Alacritty), shells, and OSes will
+land incrementally.
 
 ## Install
 

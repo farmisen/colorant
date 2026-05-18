@@ -1,8 +1,10 @@
 //! OSC (Operating System Command) escape sequence emitter.
 //!
 //! These sequences are the standard xterm-flavored mechanism for setting and
-//! resetting terminal colors at runtime. Every modern terminal we care about
-//! supports them: Ghostty, Kitty, iTerm2, WezTerm, and recent Alacritty.
+//! resetting terminal colors at runtime. Every modern terminal supports them
+//! to some degree — colorant currently drives Ghostty and iTerm2; Kitty,
+//! WezTerm, and Alacritty are protocol-compatible and gated only on detection
+//! (see [`super::utils::detect`]).
 //!
 //! Sequences used:
 //! - `OSC 10 ; #rrggbb BEL` — set default foreground
