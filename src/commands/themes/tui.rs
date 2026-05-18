@@ -539,7 +539,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             // feedback while apply() does any synchronous
                             // Gogh fetches for picks they never previewed.
                             // Without this the TUI looks frozen for up to
-                            // 30s × number-of-themes worst case.
+                            // tens of seconds per uncached theme.
                             if apply_needs_feedback(app) {
                                 terminal.draw(|f| draw_applying(f, app))?;
                             }
@@ -1075,11 +1075,18 @@ fn apply_needs_feedback(app: &App) -> bool {
         })
 }
 
-/// Render a centered "Applying…" overlay on top of the normal UI so
-/// the user has visible feedback during the (possibly slow) apply step.
+/// Overlay rendered by `event_loop` before `apply()` when
+/// `apply_needs_feedback` is true. Sits on top of the normal UI via
+/// `Clear` so the user sees "fetching themes…" instead of an
+/// apparently-frozen TUI.
 fn draw_applying(frame: &mut ratatui::Frame, app: &App) {
     draw(frame, app);
     let area = frame.area();
+    // Skip the overlay on terminals too small to fit it. Matches the
+    // graceful-degrade pattern `draw_preview` uses for its shell pane.
+    if area.width < 6 || area.height < 3 {
+        return;
+    }
     let w = 32u16.min(area.width.saturating_sub(4));
     let h = 3u16;
     let x = area.x + area.width.saturating_sub(w) / 2;
@@ -1396,7 +1403,8 @@ fn load_themes(config: &Config, warnings: &mut Vec<String>) -> Result<Vec<ThemeE
         };
         warnings.push(format!(
             "note: {} gogh theme(s) skipped (names contain characters \
-             colorant can't yet handle, e.g. spaces or parens): {}{}",
+             that can't be used in theme filenames, e.g. path \
+             separators, quotes, or control characters): {}{}",
             gogh_skipped.len(),
             names.join(", "),
             suffix,
@@ -1770,6 +1778,154 @@ mod tests {
         assert!(palette.contains("bg = #001122"));
         let rc = fs::read_to_string(&app.rc_path).unwrap();
         assert!(rc.contains("extends = dracula"));
+    }
+
+    // --- apply_needs_feedback: predicate gating the "Applying…" overlay ---
+
+    fn app_with_picks_and_one_theme(theme: ThemeEntry, pick_idx: usize) -> App {
+        let mut picks = Picks::default();
+        picks.toggle_both(pick_idx);
+        let themes = vec![theme];
+        let visible: Vec<usize> = (0..themes.len()).collect();
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let (fetch_tx, fetch_rx) = channel();
+        App {
+            themes,
+            visible,
+            list_state,
+            picks,
+            source_filter: SourceFilter::All,
+            filter: String::new(),
+            editing_filter: false,
+            rc_path: PathBuf::from("/tmp/.colorantrc"),
+            themes_dir: PathBuf::from("/tmp/themes"),
+            applied: None,
+            fetch_tx,
+            fetch_rx,
+        }
+    }
+
+    fn theme_for_feedback(
+        origin: Option<Source>,
+        palette: PaletteState,
+        installed: bool,
+    ) -> ThemeEntry {
+        ThemeEntry {
+            name: ThemeName::parse("alpha").unwrap(),
+            origin,
+            palette,
+            installed,
+        }
+    }
+
+    #[test]
+    fn apply_needs_feedback_false_for_no_picks() {
+        let themes = vec![entry("alpha", Some(Source::Gogh))];
+        let visible: Vec<usize> = (0..themes.len()).collect();
+        let (fetch_tx, fetch_rx) = channel();
+        let app = App {
+            themes,
+            visible,
+            list_state: ListState::default(),
+            picks: Picks::default(),
+            source_filter: SourceFilter::All,
+            filter: String::new(),
+            editing_filter: false,
+            rc_path: PathBuf::from("/tmp/.colorantrc"),
+            themes_dir: PathBuf::from("/tmp/themes"),
+            applied: None,
+            fetch_tx,
+            fetch_rx,
+        };
+        assert!(!apply_needs_feedback(&app));
+    }
+
+    #[test]
+    fn apply_needs_feedback_false_when_picked_theme_installed() {
+        let app = app_with_picks_and_one_theme(
+            theme_for_feedback(
+                Some(Source::Gogh),
+                PaletteState::Loaded(Box::default()),
+                true,
+            ),
+            0,
+        );
+        assert!(!apply_needs_feedback(&app));
+    }
+
+    #[test]
+    fn apply_needs_feedback_false_for_bundled_pick_regardless_of_state() {
+        let app = app_with_picks_and_one_theme(
+            theme_for_feedback(
+                Some(Source::Bundled),
+                PaletteState::Loaded(Box::default()),
+                false,
+            ),
+            0,
+        );
+        assert!(!apply_needs_feedback(&app));
+    }
+
+    #[test]
+    fn apply_needs_feedback_false_when_gogh_pick_already_loaded() {
+        let app = app_with_picks_and_one_theme(
+            theme_for_feedback(
+                Some(Source::Gogh),
+                PaletteState::Loaded(Box::default()),
+                false,
+            ),
+            0,
+        );
+        assert!(!apply_needs_feedback(&app));
+    }
+
+    #[test]
+    fn apply_needs_feedback_true_when_gogh_pick_unfetched() {
+        // Pending is representative — Fetching and Failed take the same
+        // `_` arm in apply() and produce the same overlay-needed answer.
+        let app = app_with_picks_and_one_theme(
+            theme_for_feedback(Some(Source::Gogh), PaletteState::Pending, false),
+            0,
+        );
+        assert!(apply_needs_feedback(&app));
+    }
+
+    #[test]
+    fn apply_needs_feedback_true_when_any_slot_needs_fetch() {
+        // Two-slot pick: dark is a fast install, light is an uncached
+        // Gogh — overlay needed because at least one slot triggers a
+        // synchronous fetch.
+        let themes = vec![
+            theme_for_feedback(
+                Some(Source::Bundled),
+                PaletteState::Loaded(Box::default()),
+                true,
+            ),
+            theme_for_feedback(Some(Source::Gogh), PaletteState::Pending, false),
+        ];
+        let visible: Vec<usize> = (0..themes.len()).collect();
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let mut picks = Picks::default();
+        picks.toggle_dark(0);
+        picks.toggle_light(1);
+        let (fetch_tx, fetch_rx) = channel();
+        let app = App {
+            themes,
+            visible,
+            list_state,
+            picks,
+            source_filter: SourceFilter::All,
+            filter: String::new(),
+            editing_filter: false,
+            rc_path: PathBuf::from("/tmp/.colorantrc"),
+            themes_dir: PathBuf::from("/tmp/themes"),
+            applied: None,
+            fetch_tx,
+            fetch_rx,
+        };
+        assert!(apply_needs_feedback(&app));
     }
 
     // --- apply_fetch_result: the channel contract between worker

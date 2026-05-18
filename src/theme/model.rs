@@ -60,7 +60,7 @@ pub enum ThemeNameError {
 /// `é` and CJK both work), plus `.`, `-`, `_`, ` ` (interior only),
 /// `(`, `)`, and `+`. This is wide enough to cover the Gogh catalog
 /// (`3024 Day`, `Catppuccin Frappé`, `Flatland (Palenight)`,
-/// `Vs Code Dark+`) while still ruling out path traversal (`/`, `\`),
+/// `VS Code Dark+`) while still ruling out path traversal (`/`, `\`),
 /// shell-quoting hazards (`"`, `'`), and control characters. Leading
 /// or trailing whitespace is rejected to avoid surprising filesystem
 /// behavior and asymmetric rc-line trim.
@@ -71,19 +71,23 @@ impl ThemeName {
     /// Parse a theme name. See the [`ThemeName`] doc comment for the
     /// accepted character set.
     pub fn parse(s: &str) -> Result<Self, ThemeNameError> {
-        if s.is_empty() {
-            return Err(ThemeNameError::Empty);
-        }
         // Leading/trailing whitespace would be a silent footgun:
         // filesystems with trailing-space filenames are weird, and the
         // rc parser trims surrounding whitespace before validation
         // anyway (so accepting it here would produce a name the parser
-        // would never round-trip).
-        let first = s.chars().next().expect("non-empty");
+        // would never round-trip). Empty-check is folded into the
+        // let-else on `next()` so the invariant lives in the control
+        // flow rather than in spatial adjacency.
+        let mut chars = s.chars();
+        let Some(first) = chars.next() else {
+            return Err(ThemeNameError::Empty);
+        };
         if first.is_whitespace() {
             return Err(ThemeNameError::InvalidChar(s.to_string(), first));
         }
-        let last = s.chars().next_back().expect("non-empty");
+        // `s` is non-empty here, so `next_back` on a fresh iterator is
+        // guaranteed Some. For a single-char string `last == first`.
+        let last = s.chars().next_back().unwrap_or(first);
         if last.is_whitespace() {
             return Err(ThemeNameError::InvalidChar(s.to_string(), last));
         }
@@ -269,6 +273,10 @@ mod theme_name_tests {
             Err(ThemeNameError::InvalidChar(_, '/'))
         ));
         assert!(matches!(
+            ThemeName::parse("foo\\bar"),
+            Err(ThemeNameError::InvalidChar(_, '\\'))
+        ));
+        assert!(matches!(
             ThemeName::parse("~/themes"),
             Err(ThemeNameError::InvalidChar(_, '~'))
         ));
@@ -283,7 +291,7 @@ mod theme_name_tests {
             ThemeName::parse("Flatland (Palenight)").unwrap().as_str(),
             "Flatland (Palenight)"
         );
-        assert!(ThemeName::parse("Vs Code Dark+").is_ok());
+        assert!(ThemeName::parse("VS Code Dark+").is_ok());
         // Unicode alphabetics (accented Latin, CJK) are alphanumeric
         // under Unicode rules — useful for `Catppuccin Frappé` etc.
         assert!(ThemeName::parse("Catppuccin Frappé").is_ok());
