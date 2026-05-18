@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod config;
+mod fs_util;
 mod mode;
 mod shell;
 mod terminal;

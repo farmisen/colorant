@@ -9,10 +9,11 @@
 //! a previously-unfetched theme.
 
 use crate::config::cache_dir;
+use crate::fs_util::atomic_write;
 use crate::theme::model::{HexColor, ParsedPalette, ThemeLayer};
 use anyhow::{Context, Result, anyhow};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Where Gogh's individual theme YAMLs live on the raw CDN. Each file is
@@ -58,22 +59,6 @@ pub fn sync() -> Result<Vec<String>> {
     let json = serialize_names(&names);
     atomic_write(&path, &json)?;
     Ok(names)
-}
-
-/// Write `content` to `dest` atomically: stages into `<dest>.tmp` and
-/// renames over. Avoids leaving a half-written file when the write is
-/// interrupted (disk full, signal, etc.) — important here because both
-/// `sync` (catalog) and `fetch`-driven installs are the kind of long-ish
-/// I/O the user might Ctrl-C in the middle of.
-fn atomic_write(dest: &Path, content: &str) -> Result<()> {
-    let tmp = dest.with_extension(match dest.extension().and_then(|s| s.to_str()) {
-        Some(ext) => format!("{ext}.tmp"),
-        None => "tmp".to_string(),
-    });
-    fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, dest)
-        .with_context(|| format!("renaming {} to {}", tmp.display(), dest.display()))?;
-    Ok(())
 }
 
 /// Return the cached list of theme names. `None` means the user hasn't
@@ -196,7 +181,14 @@ fn assign(slot: &mut Option<HexColor>, value: &str) {
 }
 
 /// Split `key: value` (Gogh-flavored YAML), stripping surrounding quotes
-/// from the value. Returns `None` for lines without a `:` or empty keys.
+/// and any trailing `# comment` from the value. Returns `None` for lines
+/// without a `:` or empty keys.
+///
+/// Quoted values: take everything between the opening and matching closing
+/// quote (so the trailing comment in `'#abc'  # remark` is discarded).
+/// Unquoted values: strip from the first `#` onwards (YAML's comment
+/// marker) before trimming whitespace. Gogh's color values are always
+/// quoted, so the unquoted path only matters for non-color keys.
 fn split_kv(line: &str) -> Option<(String, String)> {
     let colon = line.find(':')?;
     let key = line[..colon].trim().to_ascii_lowercase();
@@ -204,11 +196,14 @@ fn split_kv(line: &str) -> Option<(String, String)> {
         return None;
     }
     let value = line[colon + 1..].trim();
-    let value = value
-        .trim_start_matches(['"', '\''])
-        .trim_end_matches(['"', '\''])
-        .to_string();
-    Some((key, value))
+    let value = if let Some(rest) = value.strip_prefix('\'') {
+        rest.split_once('\'').map(|(v, _)| v).unwrap_or(rest)
+    } else if let Some(rest) = value.strip_prefix('"') {
+        rest.split_once('"').map(|(v, _)| v).unwrap_or(rest)
+    } else {
+        value.split('#').next().unwrap_or("").trim()
+    };
+    Some((key, value.to_string()))
 }
 
 /// Parse a GitHub Git Trees API response and return the list of theme
@@ -387,6 +382,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_gogh_yaml_strips_trailing_yaml_comments() {
+        // The real Gogh format puts a comment after every color value, e.g.
+        // `color_01: '#363636'    # Black (Host)`. Earlier versions of
+        // `split_kv` left the comment in the value, `HexColor::parse`
+        // rejected it, every color slot stayed None, and the empty-palette
+        // guard fired — so every Gogh preview failed with "preview
+        // unavailable". Lock down the parse so that regression can't
+        // sneak back.
+        let content = "\
+            foreground: '#abcdef'    # Foreground (Text)\n\
+            background: '#001122'    # Background\n\
+            cursor: \"#bbbbbb\"     # Cursor\n\
+            color_01: '#363636'    # Black (Host)\n\
+        ";
+        let palette = parse_gogh_yaml(content).unwrap();
+        assert_eq!(palette.layer.fg, HexColor::parse("#abcdef"));
+        assert_eq!(palette.layer.bg, HexColor::parse("#001122"));
+        assert_eq!(palette.layer.cursor, HexColor::parse("#bbbbbb"));
+        assert_eq!(palette.layer.palette[0], HexColor::parse("#363636"));
+    }
+
+    #[test]
     fn parse_gogh_yaml_ignores_unknown_top_level_keys() {
         let content = "name: Whatever\nlicense: MIT\nfg: nonstandard\nforeground: '#abcdef'\n";
         let palette = parse_gogh_yaml(content).unwrap();
@@ -501,5 +518,27 @@ mod tests {
         // Unreserved characters pass through.
         assert_eq!(percent_encode_path("Dracula"), "Dracula");
         assert_eq!(percent_encode_path("tokyo-night-day"), "tokyo-night-day");
+    }
+
+    #[test]
+    fn split_kv_unquoted_hash_starts_comment() {
+        // Documented limitation: in an unquoted value, '#' is treated
+        // as YAML's comment marker, so an unquoted hex literal would
+        // be parsed as empty. Gogh always quotes its color values so
+        // this only affects non-color keys we ignore anyway — but if
+        // upstream ever stops quoting, every color slot will silently
+        // become empty and parse_gogh_yaml will error with "no
+        // recognized color keys". Test locks down the current behavior
+        // so the surprise can't sneak in unannounced.
+        assert_eq!(
+            split_kv("foreground: #abcdef"),
+            Some(("foreground".to_string(), "".to_string()))
+        );
+    }
+
+    #[test]
+    fn split_kv_returns_none_for_lines_without_colon() {
+        assert_eq!(split_kv("just-a-bare-line"), None);
+        assert_eq!(split_kv(""), None);
     }
 }
