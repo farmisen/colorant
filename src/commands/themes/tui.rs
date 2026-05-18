@@ -10,6 +10,7 @@
 //! as part of apply. Other keys in the rc are preserved.
 
 use crate::config::{Config, THEME_FILE_NAME};
+use crate::fs_util::atomic_write;
 use crate::theme::bundled::BUNDLED_THEMES;
 use crate::theme::gogh;
 use crate::theme::model::{HexColor, ThemeLayer, ThemeName};
@@ -18,7 +19,7 @@ use crate::theme::rc::rewrite_extends;
 use crate::theme::resolve::PALETTE_EXTENSION;
 use crate::theme::source::Source;
 use anyhow::{Context, Result, anyhow};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -28,29 +29,46 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::thread;
+use std::time::Duration;
+
+/// State of a theme's color data within the TUI session.
+///
+/// Bundled / installed entries land in `Loaded` from the start. Gogh
+/// entries start as `Pending`, transition to `Loaded` on a successful
+/// fetch, or to `Failed` (carrying the error message) when the fetch
+/// errored. `Fetching` is a transient state set while a background
+/// thread is in flight — the preview pane renders it as "(fetching…)"
+/// so the user has feedback during the wait.
+enum PaletteState {
+    /// Loaded. Boxed to keep the enum small; `ThemeLayer` is hundreds
+    /// of bytes (clippy::large_enum_variant).
+    Loaded(Box<ThemeLayer>),
+    /// Catalog entry without colors fetched yet. Only constructed for
+    /// `origin == Some(Source::Gogh)`.
+    Pending,
+    /// Background fetch in flight; spawned by `ensure_loaded_selected`.
+    Fetching,
+    /// Fetch errored. Carries the stringified anyhow chain for display.
+    Failed(String),
+}
 
 /// One row in the browseable theme list.
 ///
 /// `origin` is where the theme is known from — `Some(Bundled)` /
 /// `Some(Gogh)` for entries that appeared in a catalog, `None` for
 /// installed-on-disk palettes whose origin we can't determine.
-///
-/// `layer` is `Some` when we have the colors loaded — either eagerly
-/// (bundled / installed) or after a successful lazy fetch (gogh). It's
-/// `None` for gogh entries that haven't been fetched yet during this TUI
-/// session. `fetch_failed` short-circuits retries on every navigation
-/// when a fetch errored (typically: offline).
 struct ThemeEntry {
     name: ThemeName,
     origin: Option<Source>,
-    layer: Option<ThemeLayer>,
+    palette: PaletteState,
     installed: bool,
-    fetch_failed: bool,
 }
 
 /// Which slot a theme is currently assigned to. A single theme can occupy
@@ -150,17 +168,31 @@ impl Picks {
     }
 }
 
+/// Filter cycle stops. `Source(s)` restricts by `origin == Some(s)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceFilter {
+    All,
+    Source(Source),
+}
+
+/// Worker → event-loop fetch result. `name` is matched against
+/// `theme.name` (entries are unique-by-name in load_themes' BTreeMap).
+struct FetchResult {
+    name: ThemeName,
+    outcome: std::result::Result<ThemeLayer, String>,
+}
+
 struct App {
     themes: Vec<ThemeEntry>,
     /// Indices into `themes` for the rows currently shown in the list,
-    /// reflecting `source_filter` + `filter`. The list cursor (`list_state`)
-    /// indexes into this `visible` slice, not into `themes` directly.
-    /// Recomputed by [`App::recompute_visible`] whenever a filter changes.
+    /// reflecting `source_filter` + `filter`. The list cursor
+    /// (`list_state`) indexes into this `visible` slice, not into
+    /// `themes` directly. Recomputed by [`App::recompute_visible`]
+    /// whenever a filter changes.
     visible: Vec<usize>,
     list_state: ListState,
     picks: Picks,
-    /// Source filter cycle: `None` = all sources, `Some(s)` = restrict to `s`.
-    source_filter: Option<Source>,
+    source_filter: SourceFilter,
     /// Case-insensitive substring filter applied to theme names. Empty
     /// means no text filter.
     filter: String,
@@ -172,6 +204,10 @@ struct App {
     /// Filled in only on apply: the path actually written, for the final
     /// summary printed after the TUI exits.
     applied: Option<PathBuf>,
+    /// Channel for background Gogh fetches. Both ends live on `App` so
+    /// cloning `fetch_tx` per spawn never disconnects the receiver.
+    fetch_tx: Sender<FetchResult>,
+    fetch_rx: Receiver<FetchResult>,
 }
 
 impl App {
@@ -216,10 +252,13 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, t)| {
-                if let Some(src) = self.source_filter
-                    && t.origin != Some(src)
-                {
-                    return false;
+                match self.source_filter {
+                    SourceFilter::All => {}
+                    SourceFilter::Source(src) => {
+                        if t.origin != Some(src) {
+                            return false;
+                        }
+                    }
                 }
                 if !needle.is_empty() && !t.name.as_str().to_lowercase().contains(&needle) {
                     return false;
@@ -240,12 +279,12 @@ impl App {
         self.list_state.select(new_pos);
     }
 
-    /// Cycle the source filter: None → Bundled → Gogh → None → …
+    /// Cycle the source filter: All → Bundled → Gogh → All → …
     fn cycle_source_filter(&mut self) {
         self.source_filter = match self.source_filter {
-            None => Some(Source::Bundled),
-            Some(Source::Bundled) => Some(Source::Gogh),
-            Some(Source::Gogh) => None,
+            SourceFilter::All => SourceFilter::Source(Source::Bundled),
+            SourceFilter::Source(Source::Bundled) => SourceFilter::Source(Source::Gogh),
+            SourceFilter::Source(Source::Gogh) => SourceFilter::All,
         };
         self.recompute_visible();
     }
@@ -286,8 +325,32 @@ impl App {
 }
 
 pub fn run(config: &Config) -> Result<()> {
-    let themes = load_themes(config)?;
+    let mut warnings: Vec<String> = Vec::new();
+
+    // First-run auto-sync: if Gogh's catalog has never been fetched,
+    // pull it now so the TUI has a populated list. Runs before raw
+    // mode so messages reach the user directly; outcome is reported
+    // inline so they aren't left wondering why Gogh is empty when
+    // sync silently failed.
+    if let Ok(None) = gogh::cached_names() {
+        eprintln!("Syncing Gogh catalog (first-time setup)...");
+        match gogh::sync() {
+            Ok(names) => eprintln!("  fetched {} themes.", names.len()),
+            Err(e) => {
+                eprintln!("  sync failed: {e:#}");
+                eprintln!(
+                    "  (continuing with bundled themes only — \
+                     run `colorant themes sync` to retry when connected)"
+                );
+            }
+        }
+    }
+
+    let themes = load_themes(config, &mut warnings)?;
     if themes.is_empty() {
+        for w in &warnings {
+            eprintln!("{w}");
+        }
         eprintln!(
             "No themes available. Run `colorant themes install --all` or drop \
              a .colorant palette into {}.",
@@ -307,33 +370,36 @@ pub fn run(config: &Config) -> Result<()> {
         Ok(content) => picks_from_rc_content(&content, &themes),
         Err(e) if e.kind() == io::ErrorKind::NotFound => (Picks::default(), Vec::new()),
         Err(e) => {
-            eprintln!(
+            warnings.push(format!(
                 "warning: could not read {}: {e} (starting with empty picks)",
                 rc_path.display()
-            );
+            ));
             (Picks::default(), Vec::new())
         }
     };
     for name in &missing {
-        eprintln!(
+        warnings.push(format!(
             "warning: {} references theme {:?} which isn't installed or bundled — \
              it won't be preserved on apply",
             rc_path.display(),
             name
-        );
+        ));
     }
 
+    let (fetch_tx, fetch_rx) = channel();
     let mut app = App {
         themes,
         visible: Vec::new(),
         list_state: ListState::default(),
         picks,
-        source_filter: None,
+        source_filter: SourceFilter::All,
         filter: String::new(),
         editing_filter: false,
         rc_path,
         themes_dir: config.base_theme_dir.clone(),
         applied: None,
+        fetch_tx,
+        fetch_rx,
     };
     app.recompute_visible();
 
@@ -349,12 +415,20 @@ pub fn run(config: &Config) -> Result<()> {
     }));
 
     let mut terminal = setup_terminal()?;
+    ensure_loaded_selected(&mut app);
     let outcome = event_loop(&mut terminal, &mut app);
     let restore = restore_terminal(&mut terminal);
     // Event-loop errors take precedence — the user cares about why the
     // TUI failed, not about cleanup hiccups.
     outcome?;
     restore?;
+
+    // Replay any warnings we accumulated before the alt screen took over —
+    // they'd otherwise be hidden by `EnterAlternateScreen` and the user
+    // wouldn't know about rc-read failures or skipped gogh entries.
+    for w in &warnings {
+        eprintln!("{w}");
+    }
 
     if let Some(written) = &app.applied {
         println!("Updated {}", written.display());
@@ -375,29 +449,52 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     // Try every step even if an earlier one fails so the user has the
-    // best chance of getting a usable terminal back. Surface the first
-    // failure (with a hint), if any.
+    // best chance of getting a usable terminal back. Remember the first
+    // error and return it at the end — short-circuiting on the first
+    // failure would leave the terminal in raw mode + alt screen if
+    // `disable_raw_mode` itself errored.
     let raw = disable_raw_mode();
     let alt = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let cursor = terminal.show_cursor();
+    let mut first_err: Option<anyhow::Error> = None;
     for (label, result) in [
-        ("disabling raw mode", raw),
-        ("leaving alternate screen", alt),
-        ("restoring cursor", cursor),
+        ("disabling raw mode", raw.map_err(anyhow::Error::from)),
+        ("leaving alternate screen", alt.map_err(anyhow::Error::from)),
+        ("restoring cursor", cursor.map_err(anyhow::Error::from)),
     ] {
         if let Err(e) = result {
             eprintln!(
                 "warning: {label} failed during cleanup: {e}. Run `reset` if your terminal looks broken."
             );
-            return Err(e).context(label);
+            if first_err.is_none() {
+                first_err = Some(e.context(label));
+            }
         }
     }
-    Ok(())
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
+
+/// How long to wait for input before redrawing. Short enough that a
+/// completed background fetch lands in the preview pane within a frame
+/// of the worker thread sending its result, long enough that we're not
+/// spinning the CPU on an idle TUI.
+const POLL_INTERVAL: Duration = Duration::from_millis(80);
 
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     loop {
+        // Drain any background fetch results before drawing so completed
+        // previews show up immediately (and not after the next keystroke).
+        drain_fetch_results(app);
         terminal.draw(|f| draw(f, app))?;
+        // Poll for input with a short timeout so an in-flight fetch can
+        // unblock the redraw loop the moment it completes — without this,
+        // the TUI would only refresh when the user pressed a key.
+        if !event::poll(POLL_INTERVAL)? {
+            continue;
+        }
         match event::read()? {
             // Resize: next iteration of the loop redraws against the new
             // size. Without this match arm, the TUI would stay frozen on
@@ -405,7 +502,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
             Event::Resize(_, _) => continue,
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 if app.editing_filter {
-                    handle_filter_key(app, key.code);
+                    handle_filter_key(app, key.code, key.modifiers);
                 } else {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
@@ -430,7 +527,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                         KeyCode::Char('d') => app.assign_selected_to(|p, i| p.toggle_dark(i)),
                         KeyCode::Char('l') => app.assign_selected_to(|p, i| p.toggle_light(i)),
                         KeyCode::Char('c') => app.picks.clear(),
-                        KeyCode::Char('s') => app.cycle_source_filter(),
+                        KeyCode::Char('s') => {
+                            app.cycle_source_filter();
+                            ensure_loaded_selected(app);
+                        }
                         KeyCode::Char('/') => {
                             app.editing_filter = true;
                         }
@@ -448,14 +548,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
 }
 
 /// Key handling while `/` filter mode is active. Typing appends to the
-/// filter, backspace removes a char, Esc cancels (clears the filter and
-/// exits), Enter commits (keeps the filter but exits the input mode).
-fn handle_filter_key(app: &mut App, code: KeyCode) {
+/// filter, Backspace removes a char (recomputing the visible list each
+/// time), Enter commits (keeps the filter but exits the input mode),
+/// Esc exits the input mode but preserves the filter (vim/fzf
+/// convention), Ctrl-U clears the filter entirely.
+fn handle_filter_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     match code {
         KeyCode::Esc => {
-            app.filter.clear();
             app.editing_filter = false;
-            app.recompute_visible();
             ensure_loaded_selected(app);
         }
         KeyCode::Enter => {
@@ -465,45 +565,113 @@ fn handle_filter_key(app: &mut App, code: KeyCode) {
         KeyCode::Backspace => {
             app.filter.pop();
             app.recompute_visible();
+            ensure_loaded_selected(app);
+        }
+        KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+            app.filter.clear();
+            app.recompute_visible();
+            ensure_loaded_selected(app);
         }
         KeyCode::Char(c) => {
             app.filter.push(c);
             app.recompute_visible();
+            ensure_loaded_selected(app);
         }
         _ => {}
     }
 }
 
+/// Drain pending fetch results into their entries. Non-blocking; called
+/// once per event-loop iteration so completed fetches show up between
+/// keystrokes.
+fn drain_fetch_results(app: &mut App) {
+    loop {
+        match app.fetch_rx.try_recv() {
+            Ok(result) => apply_fetch_result(app, result),
+            Err(TryRecvError::Empty) => return,
+            // Unreachable while `App` holds `fetch_tx` — but we still
+            // need a non-blocking exit in case the invariant ever breaks.
+            Err(TryRecvError::Disconnected) => {
+                debug_assert!(false, "fetch channel disconnected while App is live");
+                return;
+            }
+        }
+    }
+}
+
+fn apply_fetch_result(app: &mut App, result: FetchResult) {
+    let entry = app.themes.iter_mut().find(|t| t.name == result.name);
+    debug_assert!(
+        entry.is_some(),
+        "fetch result for unknown theme {:?}",
+        result.name
+    );
+    if let Some(entry) = entry {
+        entry.palette = match result.outcome {
+            Ok(layer) => PaletteState::Loaded(Box::new(layer)),
+            Err(msg) => PaletteState::Failed(msg),
+        };
+    }
+}
+
 /// Ensure the currently-selected theme has its palette loaded. For Gogh
-/// entries whose layer hasn't been fetched yet, this issues one network
-/// request and caches the result back into the entry. Errors set
-/// `fetch_failed` so we don't retry on every navigation — the preview
-/// shows "(preview unavailable — offline?)" until the user re-navigates
-/// to a working entry.
+/// entries still in `Pending`, this spawns a background thread that does
+/// the fetch and sends the result back through `app.fetch_tx`. The entry
+/// transitions to `Fetching` so the preview shows "(fetching…)" while
+/// the request is in flight, and to `Loaded` / `Failed(reason)` once
+/// the worker reports back. `Failed` entries are not re-fetched — the
+/// user can pick a different entry, or quit and reopen the TUI to retry.
 fn ensure_loaded_selected(app: &mut App) {
     let Some(idx) = app.selected_theme_idx() else {
         return;
     };
     let entry = &app.themes[idx];
-    if entry.layer.is_some() || entry.fetch_failed {
+    if !matches!(entry.palette, PaletteState::Pending) {
         return;
     }
     let Some(Source::Gogh) = entry.origin else {
-        return; // Nothing to do for non-remote sources.
+        return;
     };
-    let name = entry.name.as_str().to_string();
-    match gogh::fetch(&name) {
-        Ok(palette) => {
-            if let Some(e) = app.themes.get_mut(idx) {
-                e.layer = Some(palette.layer);
+    let name = entry.name.clone();
+    app.themes[idx].palette = PaletteState::Fetching;
+    let tx = app.fetch_tx.clone();
+    thread::spawn(move || {
+        // Drop guard: if `gogh::fetch` panics (ureq transport assert,
+        // OOM on a hostile body, future `unwrap` regression in the
+        // parser), the worker unwinds without ever sending a result
+        // and the entry would be stuck on "(fetching…)" for the
+        // session. The guard sends a synthetic Failed on unwind so
+        // the user sees a real error and can navigate away.
+        struct PanicGuard {
+            tx: Sender<FetchResult>,
+            name: Option<ThemeName>,
+        }
+        impl Drop for PanicGuard {
+            fn drop(&mut self) {
+                if let Some(name) = self.name.take() {
+                    let _ = self.tx.send(FetchResult {
+                        name,
+                        outcome: Err("worker thread panicked".to_string()),
+                    });
+                }
             }
         }
-        Err(_) => {
-            if let Some(e) = app.themes.get_mut(idx) {
-                e.fetch_failed = true;
-            }
-        }
-    }
+        let mut guard = PanicGuard {
+            tx: tx.clone(),
+            name: Some(name.clone()),
+        };
+        let outcome = match gogh::fetch(name.as_str()) {
+            // `{:#}` renders anyhow's full context chain on one line —
+            // 404, rate-limit, DNS, parse error all surface specifically
+            // instead of collapsing to "preview unavailable".
+            Ok(palette) => Ok(palette.layer),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        // Success path: clear the guard so its Drop is a no-op, then
+        // send the real result.
+        guard.name = None;
+        let _ = tx.send(FetchResult { name, outcome });
+    });
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &App) {
@@ -556,8 +724,8 @@ fn draw_theme_list(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     // Title reflects the current source filter so the user knows what
     // they're looking at when the list is shorter than expected.
     let source_label = match app.source_filter {
-        None => "all".to_string(),
-        Some(s) => s.to_string(),
+        SourceFilter::All => "all".to_string(),
+        SourceFilter::Source(s) => s.to_string(),
     };
     let title = format!(" Themes ({} / {source_label}) ", app.visible.len());
     let list = List::new(items)
@@ -574,13 +742,27 @@ fn draw_theme_list(frame: &mut ratatui::Frame, app: &App, area: Rect) {
 }
 
 fn draw_preview(frame: &mut ratatui::Frame, app: &App, area: Rect) {
+    // Heights: 14 = 12 lines of swatch content + 2 for the border.
+    // The shell preview takes whatever's left, down to zero on tiny
+    // terminals where it just disappears (graceful degrade).
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(14), Constraint::Min(0)])
+        .split(area);
+    draw_palette_pane(frame, app, chunks[0]);
+    if chunks[1].height >= 4 {
+        draw_shell_preview_pane(frame, app, chunks[1]);
+    }
+}
+
+fn draw_palette_pane(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     let title = match app.selected() {
         Some(t) => format!(
-            " Preview: {}{} ",
+            " {} palette{} ",
             t.name,
             if t.installed { " (installed)" } else { "" }
         ),
-        None => " Preview ".to_string(),
+        None => " Palette ".to_string(),
     };
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
@@ -590,31 +772,169 @@ fn draw_preview(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         return;
     };
 
-    let lines: Vec<Line> = match (&theme.layer, theme.fetch_failed) {
-        (Some(layer), _) => {
-            let mut out = vec![
+    match &theme.palette {
+        PaletteState::Loaded(layer) => {
+            let mut swatches = vec![
                 swatch_line("fg", layer.fg.as_ref()),
                 swatch_line("bg", layer.bg.as_ref()),
                 swatch_line("cursor", layer.cursor.as_ref()),
                 Line::default(),
             ];
             for i in 0..8 {
-                out.push(palette_row(layer, i));
+                swatches.push(palette_row(layer, i));
             }
-            out
+            frame.render_widget(Paragraph::new(swatches), inner);
         }
-        (None, true) => vec![Line::from(Span::styled(
-            "  (preview unavailable — offline?)",
-            Style::default().fg(Color::DarkGray),
-        ))],
-        (None, false) => vec![Line::from(Span::styled(
+        other => frame.render_widget(
+            Paragraph::new(palette_status_lines(other)).wrap(Wrap { trim: true }),
+            inner,
+        ),
+    }
+}
+
+fn draw_shell_preview_pane(frame: &mut ratatui::Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Shell Preview ");
+
+    let Some(theme) = app.selected() else {
+        frame.render_widget(block, area);
+        return;
+    };
+
+    match &theme.palette {
+        PaletteState::Loaded(layer) => draw_shell_preview(frame, layer, area, block),
+        // Mirror the palette pane's status so the user sees consistent
+        // feedback in both boxes during the fetch / load lifecycle —
+        // otherwise the empty Shell Preview pane looks like a broken
+        // render while the fetch is in flight.
+        other => {
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            frame.render_widget(
+                Paragraph::new(palette_status_lines(other)).wrap(Wrap { trim: true }),
+                inner,
+            );
+        }
+    }
+}
+
+/// Status messages for the non-Loaded `PaletteState` variants. Shared
+/// by both the palette and shell-preview panes so they show the same
+/// "(fetching…)" / "(palette not loaded yet)" / error text in sync.
+fn palette_status_lines(state: &PaletteState) -> Vec<Line<'static>> {
+    match state {
+        PaletteState::Loaded(_) => Vec::new(),
+        PaletteState::Pending => vec![Line::from(Span::styled(
             "  (palette not loaded yet)",
             Style::default().fg(Color::DarkGray),
         ))],
-    };
+        PaletteState::Fetching => vec![Line::from(Span::styled(
+            "  (fetching…)",
+            Style::default().fg(Color::Yellow),
+        ))],
+        PaletteState::Failed(msg) => vec![
+            Line::from(Span::styled(
+                "  preview unavailable:",
+                Style::default().fg(Color::Red),
+            )),
+            Line::from(Span::styled(
+                format!("    {msg}"),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ],
+    }
+}
 
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
+/// Render a fake shell session inside `area` using the palette's colors,
+/// so the user can see how the theme will read in real use — not just
+/// "what do the 16 ANSI swatches look like" but "what does running a
+/// command actually look like with this scheme applied."
+///
+/// Exercises bg, fg, cursor, and a handful of palette slots (green for
+/// prompt + branch, blue for directories, yellow for strings + git
+/// status flags, magenta for variables, red for an error tail). The
+/// caller passes a pre-built `block` so the parent owns the title/border;
+/// we layer the palette's bg + fg onto it here.
+fn draw_shell_preview(
+    frame: &mut ratatui::Frame,
+    layer: &ThemeLayer,
+    area: Rect,
+    block: Block<'_>,
+) {
+    // Snapshot inner bounds before the block is consumed by .style().
+    let inner = block.inner(area);
+    // Missing colors fall back to ratatui defaults so partial palettes
+    // still render.
+    let to_color = |c: Option<&HexColor>| {
+        c.map(|h| {
+            let (r, g, b) = hex_to_rgb(h);
+            Color::Rgb(r, g, b)
+        })
+    };
+    let bg = to_color(layer.bg.as_ref());
+    let fg = to_color(layer.fg.as_ref());
+    let cursor = to_color(layer.cursor.as_ref());
+    let pal = |i: usize| to_color(layer.palette.get(i).and_then(|c| c.as_ref()));
+    let green = pal(2).unwrap_or(Color::Green);
+    let yellow = pal(3).unwrap_or(Color::Yellow);
+    let blue = pal(4).unwrap_or(Color::Blue);
+    let magenta = pal(5).unwrap_or(Color::Magenta);
+    let red = pal(1).unwrap_or(Color::Red);
+
+    // Layer the palette's bg + fg onto the block's style so the inner
+    // area reads as a real terminal. Per-Span fg overrides take
+    // precedence over the block-default fg.
+    let mut block_style = Style::default();
+    if let Some(c) = bg {
+        block_style = block_style.bg(c);
+    }
+    if let Some(c) = fg {
+        block_style = block_style.fg(c);
+    }
+    frame.render_widget(block.style(block_style), area);
+
+    let prompt = |s: &'static str| Span::styled(s, Style::default().fg(green));
+    let dir = |s: &'static str| Span::styled(s, Style::default().fg(blue));
+    let string = |s: &'static str| Span::styled(s, Style::default().fg(yellow));
+    let var = |s: &'static str| Span::styled(s, Style::default().fg(magenta));
+    let branch = |s: &'static str| Span::styled(s, Style::default().fg(green));
+    let modified = |s: &'static str| Span::styled(s, Style::default().fg(yellow));
+    let err = |s: &'static str| Span::styled(s, Style::default().fg(red));
+
+    // Cursor block: a single cell with the cursor color as bg so it
+    // reads as a solid block. Falls back to the fg color when cursor
+    // isn't set (some themes omit it).
+    let cursor_cell = Span::styled(
+        " ",
+        Style::default().bg(cursor.or(fg).unwrap_or(Color::White)),
+    );
+
+    let lines = vec![
+        Line::from(vec![prompt("$ "), Span::raw("ls -F")]),
+        Line::from(vec![
+            Span::raw("LICENSE  README.md  "),
+            dir("src/"),
+            Span::raw("  "),
+            dir("themes/"),
+        ]),
+        Line::from(vec![prompt("$ "), Span::raw("git status -sb")]),
+        Line::from(vec![Span::raw("## "), branch("main")]),
+        Line::from(vec![modified(" M "), Span::raw("src/main.rs")]),
+        Line::from(vec![
+            prompt("$ "),
+            Span::raw("echo "),
+            string("\"Hello, "),
+            var("$USER"),
+            string("!\""),
+        ]),
+        Line::from(Span::raw("Hello, alice!")),
+        Line::from(vec![prompt("$ "), Span::raw("cat missing.txt")]),
+        Line::from(err("cat: missing.txt: No such file or directory")),
+        Line::from(vec![prompt("$ "), cursor_cell]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_status(frame: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -652,7 +972,7 @@ fn draw_keybinds(frame: &mut ratatui::Frame, app: &App, area: Rect) {
             Span::styled("/", Style::default().fg(Color::Yellow)),
             Span::raw(app.filter.clone()),
             Span::styled(
-                "    (esc=cancel  enter=commit)",
+                "    (esc=keep-filter  enter=commit  ctrl-u=clear)",
                 Style::default().fg(Color::DarkGray),
             ),
         ])
@@ -677,7 +997,7 @@ fn swatch_line(name: &str, color: Option<&HexColor>) -> Line<'static> {
     match color {
         Some(c) => {
             spans.push(Span::raw(format!("{}  ", c.as_str())));
-            let (r, g, b) = hex_to_rgb(c.as_str());
+            let (r, g, b) = hex_to_rgb(c);
             spans.push(Span::styled(
                 "    ",
                 Style::default().bg(Color::Rgb(r, g, b)),
@@ -704,7 +1024,7 @@ fn swatch_inline(name: &str, color: Option<&HexColor>) -> Vec<Span<'static>> {
     match color {
         Some(c) => {
             spans.push(Span::raw(format!("{}  ", c.as_str())));
-            let (r, g, b) = hex_to_rgb(c.as_str());
+            let (r, g, b) = hex_to_rgb(c);
             spans.push(Span::styled(
                 "    ",
                 Style::default().bg(Color::Rgb(r, g, b)),
@@ -719,39 +1039,76 @@ fn color_name(idx: usize) -> String {
     format!("color{idx:<2}")
 }
 
-fn hex_to_rgb(hex: &str) -> (u8, u8, u8) {
-    let r = u8::from_str_radix(hex.get(1..3).unwrap_or("00"), 16).unwrap_or(0);
-    let g = u8::from_str_radix(hex.get(3..5).unwrap_or("00"), 16).unwrap_or(0);
-    let b = u8::from_str_radix(hex.get(5..7).unwrap_or("00"), 16).unwrap_or(0);
-    (r, g, b)
+/// Decompose a `HexColor` into (r, g, b). Total because `HexColor`'s
+/// constructor already validated the `#rrggbb` shape — `expect` makes
+/// that invariant explicit and surfaces a clear panic if it ever breaks.
+fn hex_to_rgb(hex: &HexColor) -> (u8, u8, u8) {
+    let s = hex.as_str();
+    let parse = |range| {
+        u8::from_str_radix(&s[range], 16).expect("HexColor invariant: 6 hex digits after #")
+    };
+    (parse(1..3), parse(3..5), parse(5..7))
 }
 
 fn apply(app: &mut App) -> Result<()> {
     let pending = app.pending_rc_block();
     if pending.is_empty() {
-        // Nothing to write — treat enter as a no-op exit. Caller will see
-        // applied stays None and won't print a summary.
         return Ok(());
     }
 
     let (both_idx, dark_idx, light_idx) = app.picks.effective();
-    // Install any picked theme that isn't yet on disk: bundled themes are
-    // copied from the in-memory blob; gogh themes are fetched if their
-    // palette hasn't already been loaded into the entry during browsing.
+
+    // Two-phase install: resolve + fetch every required palette into
+    // memory first. Only if every fetch succeeds do we touch disk — that
+    // prevents the orphan-file footgun where install #1 succeeds, install
+    // #2 fails, and the user is left with a half-applied state pointing
+    // at a theme that isn't on disk.
+    enum InstallStep<'a> {
+        Already,
+        Bundled(&'a ThemeName),
+        // Box the heavy variant — ThemeLayer is hundreds of bytes
+        // (clippy::large_enum_variant).
+        Gogh(&'a ThemeName, Box<ThemeLayer>),
+    }
+    let mut to_install: Vec<InstallStep<'_>> = Vec::new();
     for i in [both_idx, dark_idx, light_idx].into_iter().flatten() {
         let theme = &app.themes[i];
         if theme.installed {
+            to_install.push(InstallStep::Already);
             continue;
         }
-        match theme.origin {
-            Some(Source::Bundled) => install_bundled_palette(&theme.name, &app.themes_dir)?,
-            Some(Source::Gogh) => install_gogh_palette(theme, &app.themes_dir)?,
+        let step = match theme.origin {
+            Some(Source::Bundled) => InstallStep::Bundled(&theme.name),
+            Some(Source::Gogh) => {
+                let layer = match &theme.palette {
+                    PaletteState::Loaded(l) => l.clone(),
+                    // Pending / Fetching / Failed: re-fetch synchronously
+                    // because apply is the user committing — we surface
+                    // any error before any disk write happens.
+                    _ => Box::new(
+                        gogh::fetch(theme.name.as_str())
+                            .with_context(|| format!("fetching gogh theme {}", theme.name))?
+                            .layer,
+                    ),
+                };
+                InstallStep::Gogh(&theme.name, layer)
+            }
             None => {
                 return Err(anyhow!(
                     "theme {} is not installed and has no known origin",
                     theme.name
                 ));
             }
+        };
+        to_install.push(step);
+    }
+
+    // Now every required palette is in memory — touch disk.
+    for step in to_install {
+        match step {
+            InstallStep::Already => {}
+            InstallStep::Bundled(name) => install_bundled_palette(name, &app.themes_dir)?,
+            InstallStep::Gogh(name, layer) => write_palette_layer(name, &layer, &app.themes_dir)?,
         }
     }
 
@@ -773,8 +1130,7 @@ fn apply(app: &mut App) -> Result<()> {
         dark.as_ref().map(|n| n.as_str()),
         light.as_ref().map(|n| n.as_str()),
     );
-    fs::write(&app.rc_path, rewritten)
-        .with_context(|| format!("writing {}", app.rc_path.display()))?;
+    atomic_write(&app.rc_path, &rewritten)?;
     app.applied = Some(app.rc_path.clone());
     Ok(())
 }
@@ -836,29 +1192,19 @@ fn install_bundled_palette(name: &ThemeName, themes_dir: &Path) -> Result<()> {
     fs::create_dir_all(themes_dir)
         .with_context(|| format!("creating themes dir {}", themes_dir.display()))?;
     let dest = themes_dir.join(format!("{}.{}", name, PALETTE_EXTENSION));
-    fs::write(&dest, content).with_context(|| format!("writing {}", dest.display()))?;
-    Ok(())
+    atomic_write(&dest, content)
 }
 
-/// Install a Gogh palette into `themes_dir`. Reuses the already-fetched
-/// layer when the user previewed it during this TUI session (no extra
-/// network); otherwise fetches now. The written file is colorant's flat
-/// `.colorant` format — same shape `parse_palette_str` reads.
-fn install_gogh_palette(entry: &ThemeEntry, themes_dir: &Path) -> Result<()> {
-    let layer = match &entry.layer {
-        Some(l) => l.clone(),
-        None => {
-            gogh::fetch(entry.name.as_str())
-                .with_context(|| format!("fetching gogh theme {}", entry.name))?
-                .layer
-        }
-    };
+/// Write an already-resolved `ThemeLayer` to `themes_dir` as a flat
+/// `.colorant` palette file (the same shape `parse_palette_str` reads).
+/// Two-phase apply does its fetching up front; this only touches disk.
+/// The write is atomic (tmp + rename) so a disk-full mid-batch can't
+/// leave a partially-written palette file behind.
+fn write_palette_layer(name: &ThemeName, layer: &ThemeLayer, themes_dir: &Path) -> Result<()> {
     fs::create_dir_all(themes_dir)
         .with_context(|| format!("creating themes dir {}", themes_dir.display()))?;
-    let dest = themes_dir.join(format!("{}.{}", entry.name, PALETTE_EXTENSION));
-    let content = render_palette_layer(&layer);
-    fs::write(&dest, content).with_context(|| format!("writing {}", dest.display()))?;
-    Ok(())
+    let dest = themes_dir.join(format!("{}.{}", name, PALETTE_EXTENSION));
+    atomic_write(&dest, &render_palette_layer(layer))
 }
 
 /// Render a `ThemeLayer` as the flat `.colorant` key/value format used on
@@ -892,9 +1238,13 @@ fn render_palette_layer(layer: &ThemeLayer) -> String {
 /// are dropped at this stage — they'd fail later when written to the rc.
 /// TODO: relax `ThemeName` to accept Gogh's broader naming so we don't
 /// strand entries like `3024 Day` or `Flatland (Palenight)`.
-fn load_themes(config: &Config) -> Result<Vec<ThemeEntry>> {
+///
+/// Warnings about gogh-catalog state, skipped names, etc. are pushed
+/// into `warnings` so the caller can replay them after the TUI exits
+/// (otherwise `EnterAlternateScreen` swallows them).
+fn load_themes(config: &Config, warnings: &mut Vec<String>) -> Result<Vec<ThemeEntry>> {
     let mut entries: BTreeMap<String, ThemeEntry> = BTreeMap::new();
-    let mut gogh_skipped: usize = 0;
+    let mut gogh_skipped: Vec<String> = Vec::new();
 
     // Bundled (compiled in). Loaded eagerly — they're already in memory.
     for (name, content) in BUNDLED_THEMES {
@@ -906,30 +1256,40 @@ fn load_themes(config: &Config) -> Result<Vec<ThemeEntry>> {
             ThemeEntry {
                 name: theme_name,
                 origin: Some(Source::Bundled),
-                layer: Some(parse_palette_str(content).layer),
+                palette: PaletteState::Loaded(Box::new(parse_palette_str(content).layer)),
                 installed: false,
-                fetch_failed: false,
             },
         );
     }
 
     // Gogh themes from the cached catalog (no network here — `themes sync`
-    // populated it). The palette stays unloaded; we fetch lazily when the
-    // user navigates to one. Bundled themes with the same name keep their
-    // entry — `or_insert` doesn't overwrite.
-    if let Ok(Some(names)) = gogh::cached_names() {
-        for name in names {
-            let Ok(theme_name) = ThemeName::parse(&name) else {
-                gogh_skipped += 1;
-                continue;
-            };
-            entries.entry(name.clone()).or_insert(ThemeEntry {
-                name: theme_name,
-                origin: Some(Source::Gogh),
-                layer: None,
-                installed: false,
-                fetch_failed: false,
-            });
+    // populated it). The palette starts `Pending`; we fetch lazily when
+    // the user navigates to one. Bundled themes with the same name keep
+    // their entry — `or_insert` doesn't overwrite. Split the `cached_names`
+    // result explicitly so corrupted-index errors don't masquerade as
+    // "no catalog synced yet".
+    match gogh::cached_names() {
+        Ok(Some(names)) => {
+            for name in names {
+                let Ok(theme_name) = ThemeName::parse(&name) else {
+                    gogh_skipped.push(name);
+                    continue;
+                };
+                entries.entry(name.clone()).or_insert(ThemeEntry {
+                    name: theme_name,
+                    origin: Some(Source::Gogh),
+                    palette: PaletteState::Pending,
+                    installed: false,
+                });
+            }
+        }
+        Ok(None) => {
+            warnings.push(
+                "note: gogh catalog not synced — run `colorant themes sync` to browse Gogh themes here".to_string(),
+            );
+        }
+        Err(e) => {
+            warnings.push(format!("warning: gogh catalog unavailable: {e:#}"));
         }
     }
 
@@ -966,19 +1326,34 @@ fn load_themes(config: &Config) -> Result<Vec<ThemeEntry>> {
                 ThemeEntry {
                     name,
                     origin,
-                    layer: Some(parse_palette_str(&content).layer),
+                    palette: PaletteState::Loaded(Box::new(parse_palette_str(&content).layer)),
                     installed: true,
-                    fetch_failed: false,
                 },
             );
         }
     }
 
-    if gogh_skipped > 0 {
-        eprintln!(
-            "note: {gogh_skipped} gogh theme(s) skipped (names contain characters \
-             colorant can't yet handle, e.g. spaces or parens)"
-        );
+    if !gogh_skipped.is_empty() {
+        // Cap the preview so we don't dump 200 names to stderr.
+        const MAX_PREVIEW_NAMES: usize = 5;
+        let extra = gogh_skipped.len().saturating_sub(MAX_PREVIEW_NAMES);
+        let names: Vec<&str> = gogh_skipped
+            .iter()
+            .take(MAX_PREVIEW_NAMES)
+            .map(String::as_str)
+            .collect();
+        let suffix = if extra > 0 {
+            format!(", and {extra} more")
+        } else {
+            String::new()
+        };
+        warnings.push(format!(
+            "note: {} gogh theme(s) skipped (names contain characters \
+             colorant can't yet handle, e.g. spaces or parens): {}{}",
+            gogh_skipped.len(),
+            names.join(", "),
+            suffix,
+        ));
     }
 
     Ok(entries.into_values().collect())
@@ -1097,9 +1472,8 @@ mod tests {
         ThemeEntry {
             name: ThemeName::parse(name).unwrap(),
             origin: Some(Source::Bundled),
-            layer: Some(ThemeLayer::default()),
+            palette: PaletteState::Loaded(Box::default()),
             installed: false,
-            fetch_failed: false,
         }
     }
 
@@ -1189,9 +1563,15 @@ mod tests {
 
     #[test]
     fn hex_to_rgb_round_trip() {
-        assert_eq!(hex_to_rgb("#abcdef"), (0xab, 0xcd, 0xef));
-        assert_eq!(hex_to_rgb("#000000"), (0, 0, 0));
-        assert_eq!(hex_to_rgb("#ffffff"), (0xff, 0xff, 0xff));
+        assert_eq!(
+            hex_to_rgb(&HexColor::parse("#abcdef").unwrap()),
+            (0xab, 0xcd, 0xef)
+        );
+        assert_eq!(hex_to_rgb(&HexColor::parse("#000000").unwrap()), (0, 0, 0));
+        assert_eq!(
+            hex_to_rgb(&HexColor::parse("#ffffff").unwrap()),
+            (0xff, 0xff, 0xff)
+        );
     }
 
     // --- apply() end-to-end via tempdir (filesystem-touching path) ---
@@ -1203,32 +1583,33 @@ mod tests {
             ThemeEntry {
                 name: ThemeName::parse("ayu").unwrap(),
                 origin: None,
-                layer: Some(ThemeLayer::default()),
+                palette: PaletteState::Loaded(Box::default()),
                 installed: true,
-                fetch_failed: false,
             },
             ThemeEntry {
                 name: ThemeName::parse("nord").unwrap(),
                 origin: None,
-                layer: Some(ThemeLayer::default()),
+                palette: PaletteState::Loaded(Box::default()),
                 installed: true,
-                fetch_failed: false,
             },
         ];
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let visible: Vec<usize> = (0..themes.len()).collect();
+        let (fetch_tx, fetch_rx) = channel();
         App {
             themes,
             visible,
             list_state,
             picks,
-            source_filter: None,
+            source_filter: SourceFilter::All,
             filter: String::new(),
             editing_filter: false,
             rc_path: tmp.join(".colorantrc"),
             themes_dir: tmp.join("themes"),
             applied: None,
+            fetch_tx,
+            fetch_rx,
         }
     }
 
@@ -1295,58 +1676,162 @@ mod tests {
         assert!(!app.rc_path.exists());
     }
 
+    #[test]
+    fn apply_writes_cached_gogh_palette_without_network() {
+        // The central reliability claim of two-phase apply: if a Gogh
+        // theme was previewed during the session (so the palette is
+        // cached in PaletteState::Loaded), apply must reuse it instead
+        // of re-fetching. We construct a non-default layer here — if
+        // apply ever silently re-fetched, the network call would either
+        // fail (in tests we don't expect outbound traffic) or return
+        // different bytes, and the assertion below would not hold.
+        let dir = tempdir().unwrap();
+        let layer = ThemeLayer {
+            fg: HexColor::parse("#abcdef"),
+            bg: HexColor::parse("#001122"),
+            ..Default::default()
+        };
+        let themes = vec![ThemeEntry {
+            name: ThemeName::parse("dracula").unwrap(),
+            origin: Some(Source::Gogh),
+            palette: PaletteState::Loaded(Box::new(layer)),
+            installed: false,
+        }];
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        let visible: Vec<usize> = (0..themes.len()).collect();
+        let (fetch_tx, fetch_rx) = channel();
+        let mut picks = Picks::default();
+        picks.toggle_both(0);
+        let mut app = App {
+            themes,
+            visible,
+            list_state,
+            picks,
+            source_filter: SourceFilter::All,
+            filter: String::new(),
+            editing_filter: false,
+            rc_path: dir.path().join(".colorantrc"),
+            themes_dir: dir.path().join("themes"),
+            applied: None,
+            fetch_tx,
+            fetch_rx,
+        };
+        apply(&mut app).unwrap();
+        let palette = fs::read_to_string(dir.path().join("themes/dracula.colorant")).unwrap();
+        assert!(palette.contains("fg = #abcdef"));
+        assert!(palette.contains("bg = #001122"));
+        let rc = fs::read_to_string(&app.rc_path).unwrap();
+        assert!(rc.contains("extends = dracula"));
+    }
+
+    // --- apply_fetch_result: the channel contract between worker
+    // threads and the event loop ---
+
+    #[test]
+    fn apply_fetch_result_ok_transitions_to_loaded() {
+        let mut app = app_with_themes(vec![entry("alpha", Some(Source::Gogh))]);
+        app.themes[0].palette = PaletteState::Fetching;
+        let layer = ThemeLayer {
+            fg: HexColor::parse("#abcdef"),
+            ..Default::default()
+        };
+        apply_fetch_result(
+            &mut app,
+            FetchResult {
+                name: ThemeName::parse("alpha").unwrap(),
+                outcome: Ok(layer),
+            },
+        );
+        let PaletteState::Loaded(l) = &app.themes[0].palette else {
+            panic!(
+                "expected Loaded, got {:?}",
+                state_name(&app.themes[0].palette)
+            );
+        };
+        assert_eq!(l.fg, HexColor::parse("#abcdef"));
+    }
+
+    #[test]
+    fn apply_fetch_result_err_transitions_to_failed_with_message() {
+        let mut app = app_with_themes(vec![entry("alpha", Some(Source::Gogh))]);
+        app.themes[0].palette = PaletteState::Fetching;
+        apply_fetch_result(
+            &mut app,
+            FetchResult {
+                name: ThemeName::parse("alpha").unwrap(),
+                outcome: Err("HTTP 404".to_string()),
+            },
+        );
+        match &app.themes[0].palette {
+            PaletteState::Failed(msg) => assert_eq!(msg, "HTTP 404"),
+            other => panic!("expected Failed, got {:?}", state_name(other)),
+        }
+    }
+
+    // Helper for the test above; avoids deriving Debug on PaletteState
+    // (which would require Debug on ThemeLayer).
+    fn state_name(s: &PaletteState) -> &'static str {
+        match s {
+            PaletteState::Loaded(_) => "Loaded",
+            PaletteState::Pending => "Pending",
+            PaletteState::Fetching => "Fetching",
+            PaletteState::Failed(_) => "Failed",
+        }
+    }
+
     // --- filter + source cycle ---
 
     fn entry(name: &str, origin: Option<Source>) -> ThemeEntry {
         ThemeEntry {
             name: ThemeName::parse(name).unwrap(),
             origin,
-            layer: Some(ThemeLayer::default()),
+            palette: PaletteState::Loaded(Box::default()),
             installed: false,
-            fetch_failed: false,
         }
     }
 
     fn app_with_themes(themes: Vec<ThemeEntry>) -> App {
-        let visible: Vec<usize> = (0..themes.len()).collect();
         let mut state = ListState::default();
         if !themes.is_empty() {
             state.select(Some(0));
         }
+        let (fetch_tx, fetch_rx) = channel();
         let mut app = App {
             themes,
-            visible,
+            visible: Vec::new(),
             list_state: state,
             picks: Picks::default(),
-            source_filter: None,
+            source_filter: SourceFilter::All,
             filter: String::new(),
             editing_filter: false,
             rc_path: PathBuf::from("/tmp/.colorantrc"),
             themes_dir: PathBuf::from("/tmp/themes"),
             applied: None,
+            fetch_tx,
+            fetch_rx,
         };
         app.recompute_visible();
         app
     }
 
     #[test]
-    fn cycle_source_filter_rotates_none_bundled_gogh() {
+    fn cycle_source_filter_rotates_all_bundled_gogh() {
         let mut app = app_with_themes(vec![
             entry("alpha", Some(Source::Bundled)),
             entry("beta", Some(Source::Gogh)),
             entry("gamma", None),
         ]);
-        assert_eq!(app.source_filter, None);
+        assert_eq!(app.source_filter, SourceFilter::All);
         app.cycle_source_filter();
-        assert_eq!(app.source_filter, Some(Source::Bundled));
-        // Visible drops to only the bundled entry (alpha).
+        assert_eq!(app.source_filter, SourceFilter::Source(Source::Bundled));
         assert_eq!(app.visible.len(), 1);
         assert_eq!(app.themes[app.visible[0]].name.as_str(), "alpha");
         app.cycle_source_filter();
-        assert_eq!(app.source_filter, Some(Source::Gogh));
+        assert_eq!(app.source_filter, SourceFilter::Source(Source::Gogh));
         assert_eq!(app.themes[app.visible[0]].name.as_str(), "beta");
         app.cycle_source_filter();
-        assert_eq!(app.source_filter, None);
+        assert_eq!(app.source_filter, SourceFilter::All);
         assert_eq!(app.visible.len(), 3);
     }
 
@@ -1370,7 +1855,7 @@ mod tests {
             entry("catppuccin-mocha-2", Some(Source::Gogh)),
             entry("tokyo-night", Some(Source::Bundled)),
         ]);
-        app.source_filter = Some(Source::Bundled);
+        app.source_filter = SourceFilter::Source(Source::Bundled);
         app.filter = "catppuccin".to_string();
         app.recompute_visible();
         // Only the bundled catppuccin survives — gogh is filtered out
@@ -1415,5 +1900,73 @@ mod tests {
         app.recompute_visible();
         assert!(app.visible.is_empty());
         assert_eq!(app.list_state.selected(), None);
+    }
+
+    // --- handle_filter_key: filter input mode key routing ---
+
+    fn editing_app() -> App {
+        let mut app = app_with_themes(vec![
+            entry("alpha", Some(Source::Bundled)),
+            entry("beta", Some(Source::Bundled)),
+        ]);
+        app.editing_filter = true;
+        app
+    }
+
+    #[test]
+    fn filter_esc_keeps_filter_and_exits_editing() {
+        let mut app = editing_app();
+        app.filter = "alp".to_string();
+        app.recompute_visible();
+        handle_filter_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.editing_filter, "Esc should exit input mode");
+        assert_eq!(app.filter, "alp", "Esc must preserve the filter (vim/fzf)");
+    }
+
+    #[test]
+    fn filter_enter_commits_filter_and_exits_editing() {
+        let mut app = editing_app();
+        app.filter = "alp".to_string();
+        app.recompute_visible();
+        handle_filter_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!app.editing_filter);
+        assert_eq!(app.filter, "alp");
+    }
+
+    #[test]
+    fn filter_backspace_pops_one_char_and_recomputes() {
+        let mut app = editing_app();
+        app.filter = "alph".to_string();
+        app.recompute_visible();
+        handle_filter_key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(app.filter, "alp");
+        assert!(app.editing_filter, "Backspace stays in input mode");
+    }
+
+    #[test]
+    fn filter_ctrl_u_clears_filter_entirely() {
+        let mut app = editing_app();
+        app.filter = "alpha".to_string();
+        app.recompute_visible();
+        handle_filter_key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(app.filter, "");
+        assert!(app.editing_filter, "Ctrl-U keeps the user typing");
+    }
+
+    #[test]
+    fn filter_char_appends_to_filter() {
+        let mut app = editing_app();
+        handle_filter_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        handle_filter_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+        assert_eq!(app.filter, "al");
+    }
+
+    #[test]
+    fn filter_ctrl_other_char_is_treated_as_input() {
+        // Guard against accidentally widening the Ctrl-U handler: only
+        // 'u' should clear. Ctrl-A here should append 'a' as if typed.
+        let mut app = editing_app();
+        handle_filter_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(app.filter, "a");
     }
 }
