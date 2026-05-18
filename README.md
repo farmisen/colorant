@@ -50,7 +50,7 @@ For Rust developers, or to pin a specific version:
 cargo install --git https://github.com/farmisen/colorant.git
 
 # pinned to a release tag
-cargo install --git https://github.com/farmisen/colorant.git --tag v0.6.1
+cargo install --git https://github.com/farmisen/colorant.git --tag v0.7.0
 ```
 
 Installs to `~/.cargo/bin/colorant`.
