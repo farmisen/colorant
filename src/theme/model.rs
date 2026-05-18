@@ -2,9 +2,9 @@
 //!
 //! Two distinct file shapes:
 //!
-//! - **Palette** (`.colorant`): a flat set of color keys (fg, bg, cursor, 16
-//!   palette entries). No modes, no inheritance — just colors. Parsed into
-//!   `ParsedPalette`.
+//! - **Palette** (`.colorant`): a flat set of color keys (fg, bg, cursor,
+//!   tab_bg, 16 palette entries). No modes, no inheritance — just colors.
+//!   Parsed into `ParsedPalette`.
 //! - **Config** (`.colorantrc`): the per-directory file users actually edit.
 //!   Carries mode-aware inheritance via `extends` / `extends.dark` /
 //!   `extends.light`, plus its own top-level keys and optional `[dark]` /
@@ -135,6 +135,14 @@ pub struct ThemeLayer {
     pub(crate) bg: Option<HexColor>,
     /// Cursor color (OSC 12).
     pub(crate) cursor: Option<HexColor>,
+    /// Tab background color. Only some terminals expose a runtime knob —
+    /// iTerm2 honors it via OSC 1337 `SetColors=tab=...`; Ghostty has no
+    /// equivalent runtime API today, so colorant doesn't emit anything
+    /// for it. Tab foreground is intentionally not modeled: iTerm2 derives
+    /// it from contrast on its own, and we'd rather add a dedicated key
+    /// when a supported terminal exposes a tab-fg knob than carry an
+    /// unused field now.
+    pub(crate) tab_bg: Option<HexColor>,
     /// Palette entries 0..15 (OSC 4).
     pub(crate) palette: [Option<HexColor>; 16],
 }
@@ -152,6 +160,9 @@ impl ThemeLayer {
         if let Some(v) = &other.cursor {
             self.cursor = Some(v.clone());
         }
+        if let Some(v) = &other.tab_bg {
+            self.tab_bg = Some(v.clone());
+        }
         for i in 0..16 {
             if let Some(v) = &other.palette[i] {
                 self.palette[i] = Some(v.clone());
@@ -164,7 +175,18 @@ impl ThemeLayer {
         self.fg.is_none()
             && self.bg.is_none()
             && self.cursor.is_none()
+            && self.tab_bg.is_none()
             && self.palette.iter().all(|c| c.is_none())
+    }
+
+    /// Copy `bg` into `tab_bg` when `tab_bg` is unset and `bg` is set.
+    /// No-op when `tab_bg` is already explicit or `bg` is also unset.
+    pub fn fill_tab_from_bg(&mut self) {
+        if self.tab_bg.is_none()
+            && let Some(bg) = &self.bg
+        {
+            self.tab_bg = Some(bg.clone());
+        }
     }
 }
 
@@ -327,5 +349,46 @@ mod theme_name_tests {
             ThemeName::parse("\"quoted\""),
             Err(ThemeNameError::InvalidChar(_, '"'))
         ));
+    }
+}
+
+#[cfg(test)]
+mod theme_layer_tests {
+    use super::{HexColor, ThemeLayer};
+
+    #[test]
+    fn fill_tab_from_bg_is_noop_when_bg_is_unset() {
+        // No `bg` to derive from — fill_tab_from_bg must leave `tab_bg` as
+        // None rather than panic or copy from another field. Guards against
+        // a future refactor that uses `self.bg.as_ref().unwrap()`.
+        let mut layer = ThemeLayer {
+            cursor: HexColor::parse("#abcdef"),
+            ..Default::default()
+        };
+        layer.fill_tab_from_bg();
+        assert!(layer.tab_bg.is_none());
+    }
+
+    #[test]
+    fn fill_tab_from_bg_preserves_explicit_tab_bg() {
+        // An explicit `tab_bg` from any layer in the chain must beat the
+        // auto-derive. This pins the precedence documented in resolve.rs.
+        let mut layer = ThemeLayer {
+            bg: HexColor::parse("#111111"),
+            tab_bg: HexColor::parse("#ff00ff"),
+            ..Default::default()
+        };
+        layer.fill_tab_from_bg();
+        assert_eq!(layer.tab_bg, HexColor::parse("#ff00ff"));
+    }
+
+    #[test]
+    fn fill_tab_from_bg_copies_bg_when_tab_bg_unset() {
+        let mut layer = ThemeLayer {
+            bg: HexColor::parse("#1e1e2e"),
+            ..Default::default()
+        };
+        layer.fill_tab_from_bg();
+        assert_eq!(layer.tab_bg, HexColor::parse("#1e1e2e"));
     }
 }

@@ -35,6 +35,14 @@ pub struct Config {
     /// whitespace, etc.) makes `Config::load` return an error rather than
     /// silently misbehaving downstream.
     pub default_theme: Option<ThemeName>,
+
+    /// When true and the resolved theme does not set `tab_bg` explicitly,
+    /// `apply` derives it from the resolved `bg` so the tab matches the
+    /// terminal background. Set to false to leave the tab color alone
+    /// unless a `.colorantrc` / palette names it directly. Defaults to
+    /// true. Only affects terminals that support a tab-color escape
+    /// (today: iTerm2).
+    pub tab_follows_window: bool,
 }
 
 impl Default for Config {
@@ -45,6 +53,7 @@ impl Default for Config {
         Self {
             base_theme_dir,
             default_theme: None,
+            tab_follows_window: true,
         }
     }
 }
@@ -149,5 +158,13 @@ mod tests {
     fn cache_dir_returns_none_when_no_home_and_no_xdg() {
         assert_eq!(cache_dir_for(None, None), None);
         assert_eq!(cache_dir_for(Some(String::new()), None), None);
+    }
+
+    #[test]
+    fn tab_follows_window_defaults_to_true() {
+        // Pinned so a future cleanup of `Default` can't silently flip the
+        // user-facing default. The README's config.toml example and the
+        // apply-time auto-derive both rely on this.
+        assert!(Config::default().tab_follows_window);
     }
 }

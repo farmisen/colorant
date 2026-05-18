@@ -41,6 +41,11 @@ extends.light = catppuccin-latte
 # bg = #000000
 # cursor = #80a4c2
 
+# Tab color (iTerm2 only). When unset, `apply` auto-derives it from
+# the resolved `bg` unless you've turned `tab_follows_window = false`
+# in `~/.config/colorant/config.toml`.
+# tab_bg = #1e1e2e
+
 # ── Per-mode overrides ──────────────────────────────────────────────
 #
 # Keys inside `[dark]` or `[light]` apply only in that mode, and

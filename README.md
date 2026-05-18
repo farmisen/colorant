@@ -124,6 +124,7 @@ and a dozen more.
 fg     = #c0caf5
 bg     = #1a1b26
 cursor = #c0caf5
+tab_bg = #1a1b26    # iTerm2-only; ignored on Ghostty.
 color0 = #15161e
 # ...
 ```
@@ -151,7 +152,22 @@ Without it, `colorant apply` emits a terminal reset when no rc is found.
 
 ```toml
 default_theme = "catppuccin-mocha"
+
+# When true (default), if a theme doesn't set `tab_bg`, the iTerm2 tab
+# color is derived from `bg` so the tab matches the terminal background.
+# Set to false to leave the tab color alone unless a theme names it.
+tab_follows_window = true
 ```
+
+### Tab color and tmux
+
+iTerm2 is the only currently-supported terminal that exposes a runtime
+tab-color API (via `OSC 1337 ; SetColors=tab=...`). Inside tmux, that
+sequence is dropped by default — add `set -g allow-passthrough on` to
+`~/.tmux.conf` to let it through. The standard fg/bg/cursor/palette
+sequences keep working either way (tmux handles them internally).
+Ghostty has no equivalent runtime API today, so colorant doesn't emit
+anything tab-related on Ghostty.
 
 ## Uninstall
 
