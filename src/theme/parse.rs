@@ -70,8 +70,8 @@ pub enum DropReason {
     /// Section header other than `[dark]` or `[light]`. Reported once for
     /// the header itself; per-line drops inside the section are suppressed.
     UnknownSection(String),
-    /// Key isn't `fg`, `bg`, `cursor`, `color0`..`color15`, `extends`,
-    /// `extends.dark`, or `extends.light`.
+    /// Key isn't `fg`, `bg`, `cursor`, `tab_bg`, `color0`..`color15`,
+    /// `extends`, `extends.dark`, or `extends.light`.
     UnknownKey(String),
     /// Key would set a color but the value isn't a valid `#rrggbb`.
     InvalidColor { key: String, value: String },
@@ -249,6 +249,7 @@ fn apply_kv(
         "fg" => Some(&mut layer.fg),
         "bg" => Some(&mut layer.bg),
         "cursor" => Some(&mut layer.cursor),
+        "tab_bg" => Some(&mut layer.tab_bg),
         k if k.starts_with("color") => {
             let suffix = &k[5..];
             match suffix.parse::<usize>() {
@@ -289,6 +290,15 @@ mod tests {
         let pal = parse_palette_str("fg = #112233\nbg = #aabbcc\n");
         assert_eq!(pal.layer.fg, HexColor::parse("#112233"));
         assert_eq!(pal.layer.bg, HexColor::parse("#aabbcc"));
+    }
+
+    #[test]
+    fn parses_tab_bg_key() {
+        // `tab_bg` is a first-class palette key — accepted alongside fg/bg/cursor
+        // in both palette and rc files. Invalid hex still surfaces as a drop
+        // (covered by the InvalidColor diagnostic path elsewhere).
+        let pal = parse_palette_str("tab_bg = #1e1e2e\n");
+        assert_eq!(pal.layer.tab_bg, HexColor::parse("#1e1e2e"));
     }
 
     #[test]

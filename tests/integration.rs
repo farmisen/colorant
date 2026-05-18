@@ -198,6 +198,258 @@ fn apply_emits_osc_when_term_is_xterm_ghostty() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Tab color (OSC 1337 SetColors=tab=...) — iTerm2 only.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_emits_tab_osc_in_iterm2_when_tab_bg_set() {
+    // Explicit `tab_bg` in the rc should produce iTerm2's OSC 1337 SetColors
+    // payload with the hash-stripped 6-hex form.
+    let ws = make_workspace();
+    fs::write(
+        ws.path().join(".colorantrc"),
+        "bg = #1e1e2e\ntab_bg = #cdd6f4\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("TERM_PROGRAM", "iTerm.app"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]1337;SetColors=tab=cdd6f4\x07"),
+        "expected iTerm2 tab OSC for tab_bg, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_does_not_emit_tab_osc_in_ghostty_even_with_tab_bg() {
+    // Same rc, but in Ghostty — Ghostty has no runtime tab-color knob, so
+    // tab_bg is silently dropped at emit time.
+    let ws = make_workspace();
+    fs::write(
+        ws.path().join(".colorantrc"),
+        "bg = #1e1e2e\ntab_bg = #cdd6f4\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("TERM_PROGRAM", "ghostty"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !stdout.contains("\x1b]1337"),
+        "Ghostty must not see OSC 1337, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_derives_tab_from_bg_when_tab_follows_window_default() {
+    // No config.toml → tab_follows_window defaults to true. Rc sets bg but
+    // not tab_bg, so iTerm2 should receive tab = bg.
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    fs::write(ws.path().join(".colorantrc"), "bg = #1e1e2e\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[
+            ("TERM_PROGRAM", "iTerm.app"),
+            ("COLORANT_MODE", "dark"),
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]1337;SetColors=tab=1e1e2e\x07"),
+        "expected tab to derive from bg, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_skips_tab_derive_when_tab_follows_window_false() {
+    // config.toml disables auto-derive. Rc sets bg but no tab_bg → no tab OSC.
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let cfg_path = xdg.join("colorant").join("config.toml");
+    fs::write(&cfg_path, "tab_follows_window = false\n").unwrap();
+    fs::write(ws.path().join(".colorantrc"), "bg = #1e1e2e\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[
+            ("TERM_PROGRAM", "iTerm.app"),
+            ("COLORANT_MODE", "dark"),
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !stdout.contains("\x1b]1337"),
+        "tab_follows_window=false must skip tab OSC, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_explicit_tab_bg_beats_bg_in_iterm2() {
+    // When both are set, the explicit tab_bg must win — auto-derive only
+    // runs when tab_bg is unset.
+    let ws = make_workspace();
+    fs::write(
+        ws.path().join(".colorantrc"),
+        "bg = #1e1e2e\ntab_bg = #ff00ff\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("TERM_PROGRAM", "iTerm.app"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]1337;SetColors=tab=ff00ff\x07"),
+        "expected explicit tab_bg, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("\x1b]1337;SetColors=tab=1e1e2e\x07"),
+        "explicit tab_bg must beat bg-derived value, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn reset_emits_tab_default_in_iterm2() {
+    let ws = make_workspace();
+    let (stdout, stderr, code) = run_in(ws.path(), &["reset"], &[("TERM_PROGRAM", "iTerm.app")]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]1337;SetColors=tab=default\x07"),
+        "expected tab reset OSC in iTerm2, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn reset_does_not_emit_tab_osc_in_ghostty() {
+    let ws = make_workspace();
+    let (stdout, stderr, code) = run_in(ws.path(), &["reset"], &[("TERM_PROGRAM", "ghostty")]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !stdout.contains("\x1b]1337"),
+        "Ghostty must not see OSC 1337 on reset, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_emits_tab_osc_for_tab_only_theme_in_iterm2() {
+    // A rc with ONLY `tab_bg` set (no fg/bg/cursor/palette). `is_empty()`
+    // must return false so apply routes to `emit` rather than `emit_reset`,
+    // and the explicit tab_bg must reach iTerm2. Pins the is_empty() update
+    // so a future refactor that drops `tab_bg.is_none()` from is_empty
+    // doesn't silently route tab-only themes through the reset path.
+    let ws = make_workspace();
+    fs::write(ws.path().join(".colorantrc"), "tab_bg = #cdd6f4\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("TERM_PROGRAM", "iTerm.app"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]1337;SetColors=tab=cdd6f4\x07"),
+        "expected tab OSC for tab-only theme, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("\x1b]110\x07"),
+        "tab-only theme must not route to emit_reset, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_emits_tab_reset_when_follow_wants_to_derive_but_no_bg() {
+    // tab_follows_window=true (default) + rc has no bg + no explicit tab_bg.
+    // Without the reset, iTerm2 would hold whatever the previous directory's
+    // apply set, leaving the user with a tab color that doesn't belong to
+    // the current dir. Emit `SetColors=tab=default` so the tab returns to
+    // the profile's default.
+    let ws = make_workspace();
+    fs::write(ws.path().join(".colorantrc"), "fg = #abcdef\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("TERM_PROGRAM", "iTerm.app"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]10;#abcdef\x07"),
+        "missing fg OSC, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("\x1b]1337;SetColors=tab=default\x07"),
+        "expected tab reset when derive wants to fire but bg is absent, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_does_not_emit_tab_reset_when_follow_disabled_and_no_bg() {
+    // tab_follows_window=false: don't touch the tab at all when the user
+    // hasn't set tab_bg. The reset-on-derive-miss only fires when the
+    // policy is actively on but can't satisfy itself.
+    let ws = make_workspace();
+    let (xdg, _) = setup_xdg(&ws);
+    let cfg_path = xdg.join("colorant").join("config.toml");
+    fs::write(&cfg_path, "tab_follows_window = false\n").unwrap();
+    fs::write(ws.path().join(".colorantrc"), "fg = #abcdef\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[
+            ("TERM_PROGRAM", "iTerm.app"),
+            ("COLORANT_MODE", "dark"),
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !stdout.contains("\x1b]1337"),
+        "tab_follows_window=false must leave the tab untouched, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn tab_osc_is_dcs_wrapped_inside_tmux_in_iterm2() {
+    // Inside tmux, OSC 1337 must travel through the DCS passthrough envelope
+    // just like the standard OSC sequences. (tmux's `allow-passthrough on`
+    // setting is what actually delivers it to iTerm2 — that's a user-side
+    // config we document in the README, not something we can assert here.)
+    let ws = make_workspace();
+    fs::write(ws.path().join(".colorantrc"), "tab_bg = #abcdef\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[
+            ("TERM_PROGRAM", "iTerm.app"),
+            ("COLORANT_MODE", "dark"),
+            ("TMUX", "/tmp/tmux-fake,0,0"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1bPtmux;\x1b\x1b]1337;SetColors=tab=abcdef\x07\x1b\\"),
+        "expected DCS-wrapped tab OSC, got: {stdout:?}"
+    );
+}
+
 #[test]
 fn term_program_beats_lc_terminal_when_both_set() {
     // Pins the documented precedence: local identity ($TERM_PROGRAM) wins

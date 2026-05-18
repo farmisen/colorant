@@ -18,6 +18,13 @@ fg     = #cdd6f4
 bg     = #1e1e2e
 cursor = #f5e0dc
 
+# ── Tab color (iTerm2 only) ─────────────────────────────────────────
+# `tab_bg` sets the terminal tab background via iTerm2's OSC 1337
+# escape. Ghostty has no runtime tab API today, so colorant doesn't
+# emit anything for it. Omit to fall back to `bg` (see
+# `tab_follows_window` in config.toml).
+# tab_bg = #1e1e2e
+
 # ── ANSI 16-color palette ───────────────────────────────────────────
 # 0–7 are the standard ANSI colors, 8–15 are the "bright" variants.
 

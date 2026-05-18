@@ -16,6 +16,15 @@
 //! This gives the property "child always beats parent, even when the parent
 //! is a per-mode palette" — the child's top-level keys override the inherited
 //! palette, and the child's mode section overrides everything.
+//!
+//! ## Tab-color precedence
+//!
+//! `tab_bg` follows the same per-field merge as every other key, so an
+//! explicit `tab_bg = ...` anywhere in the chain (inherited palette, rc
+//! base, or `[dark]`/`[light]` section) wins, with the usual child-beats-
+//! parent ordering. The `tab_follows_window` auto-derive (in `commands/apply`)
+//! runs *after* this resolution and only fills `tab_bg` when no layer set
+//! it — so explicit > inherited > auto-derived from resolved `bg`.
 
 use super::model::{Mode, ParsedRc, ThemeLayer};
 use super::parse;

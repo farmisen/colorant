@@ -4,23 +4,27 @@
 //!    shell hook fires this on every `chpwd`/`precmd`, so a silent no-op is
 //!    the right behavior elsewhere.
 //! 2. Walk up from `cwd` looking for `.colorantrc`. If found, resolve it for
-//!    the current mode and emit OSC sequences for the resulting palette.
-//! 3. If not found, apply the configured global default palette (if any),
-//!    otherwise emit the OSC reset sequence.
+//!    the current mode, optionally auto-derive `tab_bg` from `bg`, and emit
+//!    OSC sequences for the resulting palette.
+//! 3. If not found, apply the configured global default palette (also
+//!    subject to `tab_follows_window`); otherwise emit the OSC reset
+//!    sequence.
 
 use crate::config::{Config, THEME_FILE_NAME};
 use crate::mode;
+use crate::terminal::utils::Terminal;
 use crate::terminal::{osc, utils};
+use crate::theme::model::ThemeLayer;
 use crate::theme::parse;
 use crate::theme::resolve::{PALETTE_EXTENSION, Resolver};
 use crate::walk;
 use anyhow::Result;
-use std::io::stdout;
+use std::io::{Write, stdout};
 
 pub fn run(config: &Config) -> Result<()> {
-    if utils::detect().is_none() {
+    let Some(terminal) = utils::detect() else {
         return Ok(());
-    }
+    };
 
     let cwd = std::env::current_dir()?;
     let resolver = Resolver::new(config.base_theme_dir.clone());
@@ -30,9 +34,9 @@ pub fn run(config: &Config) -> Result<()> {
         let theme = resolver.resolve(&rc_path, current_mode)?;
         let mut out = stdout().lock();
         if theme.is_empty() {
-            osc::emit_reset(&mut out)?;
+            osc::emit_reset(&mut out, terminal)?;
         } else {
-            osc::emit(&mut out, &theme)?;
+            emit_themed(&mut out, terminal, theme, config)?;
         }
         return Ok(());
     }
@@ -47,13 +51,34 @@ pub fn run(config: &Config) -> Result<()> {
             let palette = parse::parse_palette_file(&palette_path)?;
             if !palette.layer.is_empty() {
                 let mut out = stdout().lock();
-                osc::emit(&mut out, &palette.layer)?;
+                emit_themed(&mut out, terminal, palette.layer, config)?;
                 return Ok(());
             }
         }
     }
 
     let mut out = stdout().lock();
-    osc::emit_reset(&mut out)?;
+    osc::emit_reset(&mut out, terminal)?;
+    Ok(())
+}
+
+/// Apply the `tab_follows_window` policy to `layer` and emit it. When the
+/// policy is on but `tab_bg` can't be derived (no explicit value AND no `bg`
+/// to fall back to), emit a separate tab-reset so the terminal returns to
+/// its profile default rather than holding the previous directory's tab
+/// color.
+fn emit_themed<W: Write>(
+    out: &mut W,
+    terminal: Terminal,
+    mut layer: ThemeLayer,
+    config: &Config,
+) -> Result<()> {
+    if config.tab_follows_window {
+        layer.fill_tab_from_bg();
+    }
+    osc::emit(out, terminal, &layer)?;
+    if config.tab_follows_window && layer.tab_bg.is_none() {
+        osc::emit_tab_reset(out, terminal)?;
+    }
     Ok(())
 }
