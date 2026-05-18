@@ -23,6 +23,7 @@ fn run_in(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> (String, String, 
         "XDG_CONFIG_HOME",
         "XDG_CACHE_HOME",
         "TERM_PROGRAM",
+        "LC_TERMINAL",
         "TERM",
         "NO_COLOR",
     ] {
@@ -89,10 +90,20 @@ fn init_zsh_emits_hook() {
 
 #[test]
 fn apply_no_op_on_unsupported_terminal() {
+    // Set every signal `detect()` consults to a value it does not recognize,
+    // so a future detection-rule change that accidentally widens any single
+    // branch (e.g. matching any `LC_TERMINAL=*`) gets caught here.
     let ws = make_workspace();
     fs::write(ws.path().join(".colorantrc"), "fg = #abcdef\n").unwrap();
-    let (stdout, stderr, code) =
-        run_in(ws.path(), &["apply"], &[("TERM_PROGRAM", "Apple_Terminal")]);
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[
+            ("TERM_PROGRAM", "Apple_Terminal"),
+            ("LC_TERMINAL", "screen-256color"),
+            ("TERM", "xterm-256color"),
+        ],
+    );
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "");
 }
@@ -119,6 +130,98 @@ fn apply_emits_osc_in_ghostty() {
     assert!(
         stdout.contains("\x1b]11;#112233\x07"),
         "missing bg OSC, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_emits_osc_in_iterm2() {
+    let ws = make_workspace();
+    fs::write(
+        ws.path().join(".colorantrc"),
+        "fg = #abcdef\nbg = #112233\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("TERM_PROGRAM", "iTerm.app"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]10;#abcdef\x07"),
+        "missing fg OSC, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("\x1b]11;#112233\x07"),
+        "missing bg OSC, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_emits_osc_when_lc_terminal_is_iterm2() {
+    // iTerm2 forwards $LC_TERMINAL over SSH when the user enables it, so a
+    // remote shell still knows it's talking to iTerm2 even when $TERM_PROGRAM
+    // is unset or carries the remote host's terminal.
+    let ws = make_workspace();
+    fs::write(ws.path().join(".colorantrc"), "fg = #abcdef\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("LC_TERMINAL", "iTerm2"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]10;#abcdef\x07"),
+        "missing fg OSC, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_emits_osc_when_term_is_xterm_ghostty() {
+    // Multiplexers and some terminal-in-terminal setups strip $TERM_PROGRAM
+    // but preserve $TERM=xterm-ghostty. The fallback branch in detect() keeps
+    // colorant working in those sessions.
+    let ws = make_workspace();
+    fs::write(ws.path().join(".colorantrc"), "fg = #abcdef\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("TERM", "xterm-ghostty"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]10;#abcdef\x07"),
+        "missing fg OSC, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn term_program_beats_lc_terminal_when_both_set() {
+    // Pins the documented precedence: local identity ($TERM_PROGRAM) wins
+    // over SSH-forwarded identity ($LC_TERMINAL). A Ghostty user SSHing from
+    // an iTerm2 host carries `LC_TERMINAL=iTerm2` but is really in Ghostty;
+    // misclassifying them would emit the wrong terminal-specific sequences
+    // the moment any land. Today both variants emit identical OSC, so the
+    // strongest integration-level assertion is "we still emitted".
+    let ws = make_workspace();
+    fs::write(ws.path().join(".colorantrc"), "fg = #abcdef\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[
+            ("TERM_PROGRAM", "ghostty"),
+            ("LC_TERMINAL", "iTerm2"),
+            ("COLORANT_MODE", "dark"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]10;#abcdef\x07"),
+        "missing fg OSC, got: {stdout:?}"
     );
 }
 

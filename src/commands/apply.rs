@@ -18,7 +18,7 @@ use anyhow::Result;
 use std::io::stdout;
 
 pub fn run(config: &Config) -> Result<()> {
-    if !utils::supported_terminal() {
+    if utils::detect().is_none() {
         return Ok(());
     }
 

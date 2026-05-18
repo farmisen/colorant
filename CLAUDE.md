@@ -11,7 +11,7 @@
 
 colorant walks up from the current working directory looking for a `.colorantrc` file and applies the theme it describes to the terminal via standard xterm OSC escape sequences. When the user `cd`s out of a themed tree, the colors reset. When the OS flips between dark and light mode, the active theme follows.
 
-v1 scope is intentionally narrow: **Ghostty + zsh + macOS**. Additional terminals (Kitty, iTerm2, WezTerm, Alacritty), shells (bash, fish), and operating systems (Linux) land incrementally after v1.
+Supported today: **Ghostty + iTerm2, zsh, macOS**. Additional terminals (Kitty, WezTerm, Alacritty), shells (bash, fish), and operating systems (Linux) land incrementally. See `README.md` Status section for the current support matrix.
 
 ## Tech Stack
 
