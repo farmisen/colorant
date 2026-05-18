@@ -45,7 +45,7 @@ pub enum ThemeNameError {
     #[error("theme name must not be empty")]
     Empty,
     #[error(
-        "theme name {0:?} contains invalid character {1:?}; allowed: A-Z, a-z, 0-9, '.', '-', '_'"
+        "theme name {0:?} contains invalid character {1:?}; allowed: alphanumerics (Unicode), '.', '-', '_', ' ', '(', ')', '+'"
     )]
     InvalidChar(String, char),
 }
@@ -56,24 +56,38 @@ pub enum ThemeNameError {
 /// `.colorantrc` files and `default_theme` in `config.toml` refer to. It is
 /// joined to `base_theme_dir` to locate `<name>.colorant` on disk.
 ///
-/// Names are restricted to ASCII alphanumerics plus `.`, `-`, `_`. This rules
-/// out path traversal (`..`, `/`, leading `~`), whitespace, and quoting that
-/// would surprise the resolver, while matching the character set used by
-/// bundled theme names (`catppuccin-mocha`, `tokyo-night`, `one-dark`, …).
+/// Allowed characters: Unicode alphanumerics (so accented Latin like
+/// `é` and CJK both work), plus `.`, `-`, `_`, ` ` (interior only),
+/// `(`, `)`, and `+`. This is wide enough to cover the Gogh catalog
+/// (`3024 Day`, `Catppuccin Frappé`, `Flatland (Palenight)`,
+/// `Vs Code Dark+`) while still ruling out path traversal (`/`, `\`),
+/// shell-quoting hazards (`"`, `'`), and control characters. Leading
+/// or trailing whitespace is rejected to avoid surprising filesystem
+/// behavior and asymmetric rc-line trim.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ThemeName(String);
 
 impl ThemeName {
-    /// Parse a theme name. Returns `Err` if `s` is empty or contains a
-    /// character outside `[A-Za-z0-9._-]`.
+    /// Parse a theme name. See the [`ThemeName`] doc comment for the
+    /// accepted character set.
     pub fn parse(s: &str) -> Result<Self, ThemeNameError> {
         if s.is_empty() {
             return Err(ThemeNameError::Empty);
         }
-        if let Some(c) = s
-            .chars()
-            .find(|c| !(c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_'))
-        {
+        // Leading/trailing whitespace would be a silent footgun:
+        // filesystems with trailing-space filenames are weird, and the
+        // rc parser trims surrounding whitespace before validation
+        // anyway (so accepting it here would produce a name the parser
+        // would never round-trip).
+        let first = s.chars().next().expect("non-empty");
+        if first.is_whitespace() {
+            return Err(ThemeNameError::InvalidChar(s.to_string(), first));
+        }
+        let last = s.chars().next_back().expect("non-empty");
+        if last.is_whitespace() {
+            return Err(ThemeNameError::InvalidChar(s.to_string(), last));
+        }
+        if let Some(c) = s.chars().find(|c| !is_allowed(*c)) {
             return Err(ThemeNameError::InvalidChar(s.to_string(), c));
         }
         Ok(Self(s.to_string()))
@@ -83,6 +97,10 @@ impl ThemeName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+fn is_allowed(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')' | '+')
 }
 
 impl std::fmt::Display for ThemeName {
@@ -257,11 +275,42 @@ mod theme_name_tests {
     }
 
     #[test]
-    fn rejects_whitespace_and_quotes() {
+    fn accepts_gogh_style_names() {
+        // Spaces inside the name and parens are accepted so we don't
+        // drop the bulk of the Gogh catalog.
+        assert_eq!(ThemeName::parse("3024 Day").unwrap().as_str(), "3024 Day");
+        assert_eq!(
+            ThemeName::parse("Flatland (Palenight)").unwrap().as_str(),
+            "Flatland (Palenight)"
+        );
+        assert!(ThemeName::parse("Vs Code Dark+").is_ok());
+        // Unicode alphabetics (accented Latin, CJK) are alphanumeric
+        // under Unicode rules — useful for `Catppuccin Frappé` etc.
+        assert!(ThemeName::parse("Catppuccin Frappé").is_ok());
+        assert!(ThemeName::parse("테마").is_ok());
+    }
+
+    #[test]
+    fn rejects_leading_or_trailing_whitespace() {
+        // Interior spaces are allowed (see accepts_gogh_style_names),
+        // but surrounding whitespace would create silent footguns.
         assert!(matches!(
-            ThemeName::parse("name with space"),
+            ThemeName::parse(" leading"),
             Err(ThemeNameError::InvalidChar(_, ' '))
         ));
+        assert!(matches!(
+            ThemeName::parse("trailing "),
+            Err(ThemeNameError::InvalidChar(_, ' '))
+        ));
+        assert!(matches!(
+            ThemeName::parse("\tlead-tab"),
+            Err(ThemeNameError::InvalidChar(_, '\t'))
+        ));
+    }
+
+    #[test]
+    fn rejects_interior_tab_and_quotes() {
+        // Spaces are interior-OK; tabs and quotes are not.
         assert!(matches!(
             ThemeName::parse("name\tx"),
             Err(ThemeNameError::InvalidChar(_, '\t'))
@@ -269,14 +318,6 @@ mod theme_name_tests {
         assert!(matches!(
             ThemeName::parse("\"quoted\""),
             Err(ThemeNameError::InvalidChar(_, '"'))
-        ));
-    }
-
-    #[test]
-    fn rejects_non_ascii() {
-        assert!(matches!(
-            ThemeName::parse("테마"),
-            Err(ThemeNameError::InvalidChar(_, _))
         ));
     }
 }

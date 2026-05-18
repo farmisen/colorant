@@ -29,7 +29,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Stdout};
@@ -535,6 +535,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                             app.editing_filter = true;
                         }
                         KeyCode::Enter => {
+                            // Draw an "Applying…" frame so the user sees
+                            // feedback while apply() does any synchronous
+                            // Gogh fetches for picks they never previewed.
+                            // Without this the TUI looks frozen for up to
+                            // 30s × number-of-themes worst case.
+                            if apply_needs_feedback(app) {
+                                terminal.draw(|f| draw_applying(f, app))?;
+                            }
                             apply(app)?;
                             return Ok(());
                         }
@@ -1050,6 +1058,47 @@ fn hex_to_rgb(hex: &HexColor) -> (u8, u8, u8) {
     (parse(1..3), parse(3..5), parse(5..7))
 }
 
+/// True if `apply` would do a synchronous network fetch — happens when
+/// any picked Gogh theme is uninstalled and its palette isn't already
+/// `Loaded` in memory. The Enter handler uses this to decide whether
+/// to draw an "Applying…" frame before calling apply.
+fn apply_needs_feedback(app: &App) -> bool {
+    let (both_idx, dark_idx, light_idx) = app.picks.effective();
+    [both_idx, dark_idx, light_idx]
+        .into_iter()
+        .flatten()
+        .filter_map(|i| app.themes.get(i))
+        .any(|t| {
+            !t.installed
+                && matches!(t.origin, Some(Source::Gogh))
+                && !matches!(t.palette, PaletteState::Loaded(_))
+        })
+}
+
+/// Render a centered "Applying…" overlay on top of the normal UI so
+/// the user has visible feedback during the (possibly slow) apply step.
+fn draw_applying(frame: &mut ratatui::Frame, app: &App) {
+    draw(frame, app);
+    let area = frame.area();
+    let w = 32u16.min(area.width.saturating_sub(4));
+    let h = 3u16;
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let rect = Rect::new(x, y, w, h);
+    let block = Block::default().borders(Borders::ALL).title(" Applying ");
+    let inner = block.inner(rect);
+    // Clear first so the overlay isn't see-through.
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " fetching themes…",
+            Style::default().fg(Color::Yellow),
+        ))),
+        inner,
+    );
+}
+
 fn apply(app: &mut App) -> Result<()> {
     let pending = app.pending_rc_block();
     if pending.is_empty() {
@@ -1234,14 +1283,12 @@ fn render_palette_layer(layer: &ThemeLayer) -> String {
 /// name. Installed entries override catalog entries so the preview
 /// reflects whatever's actually on disk.
 ///
-/// Gogh themes whose names can't be ThemeName-parsed (spaces, parens, …)
-/// are dropped at this stage — they'd fail later when written to the rc.
-/// TODO: relax `ThemeName` to accept Gogh's broader naming so we don't
-/// strand entries like `3024 Day` or `Flatland (Palenight)`.
-///
-/// Warnings about gogh-catalog state, skipped names, etc. are pushed
-/// into `warnings` so the caller can replay them after the TUI exits
-/// (otherwise `EnterAlternateScreen` swallows them).
+/// `ThemeName::parse` accepts the Gogh charset (spaces, parens, +, Unicode
+/// alphanumerics), so the only catalog entries dropped here are those with
+/// genuinely-unusable characters (control codes, path separators, etc.).
+/// Warnings about gogh-catalog state, skipped names, etc. are pushed into
+/// `warnings` so the caller can replay them after the TUI exits (otherwise
+/// `EnterAlternateScreen` swallows them).
 fn load_themes(config: &Config, warnings: &mut Vec<String>) -> Result<Vec<ThemeEntry>> {
     let mut entries: BTreeMap<String, ThemeEntry> = BTreeMap::new();
     let mut gogh_skipped: Vec<String> = Vec::new();
