@@ -12,10 +12,7 @@ pub fn find_nearest(start: &Path, filename: &str) -> Option<PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
-        match dir.parent() {
-            Some(p) => dir = p,
-            None => return None,
-        }
+        dir = dir.parent()?;
     }
 }
 
