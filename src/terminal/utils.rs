@@ -11,6 +11,7 @@
 pub enum Terminal {
     Ghostty,
     ITerm2,
+    WezTerm,
 }
 
 /// Detect the surrounding terminal from environment variables. Returns
@@ -20,16 +21,23 @@ pub enum Terminal {
 /// 1. `TERM_PROGRAM` — set by the terminal itself in local sessions.
 /// 2. `LC_TERMINAL` — forwarded over SSH by iTerm2 when the user enables
 ///    "Send LC_TERMINAL" in its preferences.
-/// 3. `TERM` — fallback for Ghostty, which exports `xterm-ghostty` and
+/// 3. `WEZTERM_PANE` — exported by WezTerm in every pane; survives tmux,
+///    which rewrites `TERM_PROGRAM` to `tmux`. WezTerm's default `TERM` is
+///    plain `xterm-256color`, so there's no `TERM`-based fallback for it.
+/// 4. `TERM` — fallback for Ghostty, which exports `xterm-ghostty` and
 ///    survives some multiplexer setups that strip `TERM_PROGRAM`.
 pub fn detect() -> Option<Terminal> {
     match std::env::var("TERM_PROGRAM").ok().as_deref() {
         Some("ghostty") => return Some(Terminal::Ghostty),
         Some("iTerm.app") => return Some(Terminal::ITerm2),
+        Some("WezTerm") => return Some(Terminal::WezTerm),
         _ => {}
     }
     if matches!(std::env::var("LC_TERMINAL").ok().as_deref(), Some("iTerm2")) {
         return Some(Terminal::ITerm2);
+    }
+    if std::env::var_os("WEZTERM_PANE").is_some() {
+        return Some(Terminal::WezTerm);
     }
     if std::env::var("TERM")
         .ok()

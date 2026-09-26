@@ -2,8 +2,9 @@
 
 colorant is a per-directory terminal theme switcher. It walks up from the cwd to the
 nearest `.colorantrc`, applies that theme via xterm OSC sequences, resets when you leave
-the tree, and follows the OS dark/light mode. Supported today: Ghostty + iTerm2, zsh,
-macOS. The support matrix lives in the README Status section; keep it current.
+the tree, and follows the OS dark/light mode. Supported today: Ghostty + iTerm2 +
+WezTerm, zsh, macOS. The support matrix lives in the README Status section; keep it
+current.
 
 ## Critical rules
 

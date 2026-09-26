@@ -24,6 +24,7 @@ fn run_in(cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> (String, String, 
         "XDG_CACHE_HOME",
         "TERM_PROGRAM",
         "LC_TERMINAL",
+        "WEZTERM_PANE",
         "TERM",
         "NO_COLOR",
     ] {
@@ -195,6 +196,120 @@ fn apply_emits_osc_when_term_is_xterm_ghostty() {
     assert!(
         stdout.contains("\x1b]10;#abcdef\x07"),
         "missing fg OSC, got: {stdout:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WezTerm detection.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_emits_osc_in_wezterm() {
+    let ws = make_workspace();
+    fs::write(ws.path().join(".colorantrc"), "fg = #abcdef\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("TERM_PROGRAM", "WezTerm"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]10;#abcdef\x07"),
+        "missing fg OSC, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_emits_osc_when_only_wezterm_pane_is_set() {
+    // tmux rewrites $TERM_PROGRAM to `tmux`, but $WEZTERM_PANE survives from
+    // the pane that launched it, so detect() falls back to it.
+    let ws = make_workspace();
+    fs::write(ws.path().join(".colorantrc"), "fg = #abcdef\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[
+            ("TERM_PROGRAM", "tmux"),
+            ("WEZTERM_PANE", "0"),
+            ("COLORANT_MODE", "dark"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]10;#abcdef\x07"),
+        "missing fg OSC, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn apply_does_not_emit_tab_osc_in_wezterm_even_with_tab_bg() {
+    // WezTerm has no runtime tab-color escape (tab colors live in its Lua
+    // config), so tab_bg is dropped at emit time, same as Ghostty.
+    let ws = make_workspace();
+    fs::write(
+        ws.path().join(".colorantrc"),
+        "bg = #1e1e2e\ntab_bg = #cdd6f4\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[("TERM_PROGRAM", "WezTerm"), ("COLORANT_MODE", "dark")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]11;#1e1e2e\x07"),
+        "missing bg OSC, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("\x1b]1337"),
+        "WezTerm must not see OSC 1337, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn reset_emits_standard_resets_without_tab_osc_in_wezterm() {
+    let ws = make_workspace();
+    let (stdout, stderr, code) = run_in(ws.path(), &["reset"], &[("TERM_PROGRAM", "WezTerm")]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    for seq in [
+        "\x1b]110\x07",
+        "\x1b]111\x07",
+        "\x1b]112\x07",
+        "\x1b]104;15\x07",
+    ] {
+        assert!(stdout.contains(seq), "missing {seq:?}, got: {stdout:?}");
+    }
+    assert!(
+        !stdout.contains("\x1b]1337"),
+        "WezTerm must not see OSC 1337 on reset, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn term_program_beats_inherited_wezterm_pane() {
+    // An iTerm2 window launched from a WezTerm shell inherits $WEZTERM_PANE.
+    // Local $TERM_PROGRAM must win, which is observable here because only
+    // iTerm2 gets the tab-color OSC.
+    let ws = make_workspace();
+    fs::write(ws.path().join(".colorantrc"), "tab_bg = #cdd6f4\n").unwrap();
+
+    let (stdout, stderr, code) = run_in(
+        ws.path(),
+        &["apply"],
+        &[
+            ("TERM_PROGRAM", "iTerm.app"),
+            ("WEZTERM_PANE", "0"),
+            ("COLORANT_MODE", "dark"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("\x1b]1337;SetColors=tab=cdd6f4\x07"),
+        "expected iTerm2 tab OSC, got: {stdout:?}"
     );
 }
 
