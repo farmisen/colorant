@@ -11,9 +11,9 @@ active theme follows on the next shell prompt.
 
 ## Status
 
-Early development. Supported terminals: Ghostty and iTerm2 on macOS, driven
-from zsh. Other terminals (Kitty, WezTerm, Alacritty), shells, and OSes will
-land incrementally.
+Early development. Supported terminals: Ghostty, iTerm2, and WezTerm on
+macOS, driven from zsh. Other terminals (Kitty, Alacritty), shells, and OSes
+will land incrementally.
 
 ## Install
 
@@ -124,7 +124,7 @@ and a dozen more.
 fg     = #c0caf5
 bg     = #1a1b26
 cursor = #c0caf5
-tab_bg = #1a1b26    # iTerm2-only; ignored on Ghostty.
+tab_bg = #1a1b26    # iTerm2-only; ignored on Ghostty and WezTerm.
 color0 = #15161e
 # ...
 ```
@@ -166,8 +166,9 @@ tab-color API (via `OSC 1337 ; SetColors=tab=...`). Inside tmux, that
 sequence is dropped by default — add `set -g allow-passthrough on` to
 `~/.tmux.conf` to let it through. The standard fg/bg/cursor/palette
 sequences keep working either way (tmux handles them internally).
-Ghostty has no equivalent runtime API today, so colorant doesn't emit
-anything tab-related on Ghostty.
+Ghostty and WezTerm have no equivalent runtime API today (WezTerm tab
+colors live in its Lua config), so colorant doesn't emit anything
+tab-related on either.
 
 ## Uninstall
 

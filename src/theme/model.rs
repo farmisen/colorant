@@ -136,12 +136,12 @@ pub struct ThemeLayer {
     /// Cursor color (OSC 12).
     pub(crate) cursor: Option<HexColor>,
     /// Tab background color. Only some terminals expose a runtime knob —
-    /// iTerm2 honors it via OSC 1337 `SetColors=tab=...`; Ghostty has no
-    /// equivalent runtime API today, so colorant doesn't emit anything
-    /// for it. Tab foreground is intentionally not modeled: iTerm2 derives
-    /// it from contrast on its own, and we'd rather add a dedicated key
-    /// when a supported terminal exposes a tab-fg knob than carry an
-    /// unused field now.
+    /// iTerm2 honors it via OSC 1337 `SetColors=tab=...`; Ghostty and
+    /// WezTerm have no equivalent runtime API today, so colorant doesn't
+    /// emit anything for them. Tab foreground is intentionally not
+    /// modeled: iTerm2 derives it from contrast on its own, and we'd
+    /// rather add a dedicated key when a supported terminal exposes a
+    /// tab-fg knob than carry an unused field now.
     pub(crate) tab_bg: Option<HexColor>,
     /// Palette entries 0..15 (OSC 4).
     pub(crate) palette: [Option<HexColor>; 16],

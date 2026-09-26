@@ -2,8 +2,8 @@
 //!
 //! These sequences are the standard xterm-flavored mechanism for setting and
 //! resetting terminal colors at runtime. Every modern terminal supports them
-//! to some degree — colorant currently drives Ghostty and iTerm2; Kitty,
-//! WezTerm, and Alacritty are protocol-compatible and gated only on detection
+//! to some degree — colorant currently drives Ghostty, iTerm2, and WezTerm;
+//! Kitty and Alacritty are protocol-compatible and gated only on detection
 //! (see [`super::utils::detect`]).
 //!
 //! Sequences used:
@@ -97,7 +97,7 @@ fn tab_payload(terminal: Terminal, hex: &str) -> Option<String> {
             "1337;SetColors=tab={}",
             hex.trim_start_matches('#')
         )),
-        Terminal::Ghostty => None,
+        Terminal::Ghostty | Terminal::WezTerm => None,
     }
 }
 
@@ -107,7 +107,7 @@ fn tab_payload(terminal: Terminal, hex: &str) -> Option<String> {
 fn tab_reset_payload(terminal: Terminal) -> Option<&'static str> {
     match terminal {
         Terminal::ITerm2 => Some("1337;SetColors=tab=default"),
-        Terminal::Ghostty => None,
+        Terminal::Ghostty | Terminal::WezTerm => None,
     }
 }
 
@@ -175,6 +175,11 @@ mod tests {
     }
 
     #[test]
+    fn tab_payload_is_none_for_wezterm() {
+        assert!(tab_payload(Terminal::WezTerm, "#abcdef").is_none());
+    }
+
+    #[test]
     fn tab_reset_payload_is_default_for_iterm2() {
         assert_eq!(
             tab_reset_payload(Terminal::ITerm2),
@@ -185,5 +190,10 @@ mod tests {
     #[test]
     fn tab_reset_payload_is_none_for_ghostty() {
         assert!(tab_reset_payload(Terminal::Ghostty).is_none());
+    }
+
+    #[test]
+    fn tab_reset_payload_is_none_for_wezterm() {
+        assert!(tab_reset_payload(Terminal::WezTerm).is_none());
     }
 }
